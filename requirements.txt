@@ -21,7 +21,6 @@ colorspacious
 matplotlib
 moviepy==1.0.3
 imageio
-git+https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git
 timm
 dacite
 lpips
@@ -32,5 +31,4 @@ svg.py
 scikit-video
 opencv-python
 smplx
-git+https://github.com/facebookresearch/pytorch3d.git
 seaborn
