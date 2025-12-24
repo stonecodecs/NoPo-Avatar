@@ -1,0 +1,190 @@
+model:
+  encoder:
+    backbone:
+      name: croco_multi2
+      model: ViTLarge_BaseDecoder
+      patch_embed_cls: PatchEmbedDust3R
+      asymmetry_decoder: true
+      intrinsics_embed_loc: none
+      intrinsics_embed_degree: 4
+      intrinsics_embed_type: token
+      template_encoder_free: true
+      template_image_size:
+      - 1024
+      - 1024
+      template_embed_dim: 1024
+      disable_checkpointing: true
+    name: template_uv_concat_bone
+    opacity_mapping:
+      initial: 0.0
+      final: 0.0
+      warm_up: 1
+    num_monocular_samples: 32
+    num_surfaces: 1
+    predict_opacity: false
+    gaussians_per_pixel: 1
+    gaussian_adapter:
+      gaussian_scale_min: 0.5
+      gaussian_scale_max: 15.0
+      sh_degree: 4
+    d_feature: 128
+    visualizer:
+      num_samples: 8
+      min_resolution: 256
+      export_ply: false
+    apply_bounds_shim: true
+    pts3d_head_type: dpt
+    pts3d_head_skip: false
+    gs_params_head_type: dpt_gs
+    pose_free: true
+    pretrained_weights: outputs/exp_tpose/2025-04-20_21-07-06/checkpoints/epoch_176-step_300000.ckpt
+    pretrained_template_reinit: false
+    gs_params_head_upsample_type: deconv
+    apply_mask: soft
+    direct_rgbs: false
+    pts3d_for_lbs_weights: false
+    separate_xyz_head: false
+    n_hooks: 4
+    postprocess: false
+    intrinsics_embed_loc: encoder
+    intrinsics_embed_type: token
+  decoder:
+    name: lbs_splatting_cuda
+    background_color:
+    - 0.0
+    - 0.0
+    - 0.0
+    make_scale_invariant: false
+    render_no_canonical: false
+    render_no_rgb: false
+    use_sh: true
+    hard_opacities_for_branches: false
+    render_context: true
+    warp_by_shape: true
+loss:
+  mse:
+    weight: 1.0
+    use_conf: false
+    alpha: 1.0
+  lpips:
+    weight_template: 0.05
+    weight_rgb: 0.05
+    weight: 0.05
+    apply_after_step: 0
+  chamfer:
+    weight: 0.1
+    single_directional: false
+  projection:
+    weight: 1.0
+  lbs_weights:
+    weight: 0.01
+wandb:
+  project: noposplat
+  entity: j_1wen-university-of-illinois-urbana-champaign
+  name: train_thuman2.0_3views_res1024
+  mode: online
+  tags:
+  - thuman2.1
+  - 1024x1024
+mode: test
+data_loader:
+  train:
+    num_workers: 8
+    persistent_workers: true
+    batch_size: 1
+    seed: 1234
+  test:
+    num_workers: 1
+    persistent_workers: false
+    batch_size: 1
+    seed: 2345
+  val:
+    num_workers: 1
+    persistent_workers: true
+    batch_size: 1
+    seed: 3456
+optimizer:
+  lr: 0.0001
+  warm_up_steps: 2000
+  backbone_lr_multiplier: 0.1
+checkpointing:
+  load: checkpoint/thuman2.0_inputs3_res1024_iter50000.ckpt
+  every_n_train_steps: 10000
+  save_top_k: -1
+  save_weights_only: false
+train:
+  depth_mode: null
+  extended_visualization: false
+  print_log_every_n_steps: 10
+  log_every_n_steps: 1000
+  distiller: ''
+  distill_max_steps: 1000000
+test:
+  output_path: outputs/test
+  align_pose: false
+  pose_align_steps: 400
+  rot_opt_lr: 0.005
+  trans_opt_lr: 0.005
+  align_human_pose: disabled
+  human_rot_opt_lr: 0.0005
+  human_trans_opt_lr: 0.0005
+  compute_scores: true
+  save_image: true
+  save_video: false
+  save_compare: true
+  save_canonical: false
+  save_gaussians: false
+  save_lbs_weights: false
+  pose_seq: null
+  optim_pose: false
+seed: 111123
+trainer:
+  max_steps: 300001
+  val_check_interval: 1000
+  gradient_clip_val: 0.5
+  num_nodes: 1
+  accumulate_grad_batches: 1
+dataset:
+  thuman:
+    make_baseline_1: false
+    relative_pose: false
+    augment: true
+    augment_color_jitter: false
+    background_color:
+    - 0
+    - 0
+    - 0
+    overfit_to_scene: null
+    skip_bad_shape: true
+    view_sampler:
+      name: evaluation
+      index_path: assets/evaluation_thuman_view3.json
+      num_context_views: 3
+      num_target_views: 4
+      warm_up_steps: 150000
+      min_distance_between_context_views: 45
+      max_distance_between_context_views: 90
+      min_distance_to_context_views: 0
+      initial_min_distance_between_context_views: 25
+      initial_max_distance_between_context_views: 25
+    name: thuman
+    roots:
+    - datasets/thuman2.0
+    template_image_shape:
+    - 1024
+    - 1024
+    input_image_shape:
+    - 1024
+    - 1024
+    original_image_shape:
+    - 1024
+    - 1024
+    cameras_are_circular: true
+    baseline_min: 0.001
+    baseline_max: 10000000000.0
+    max_fov: 100.0
+    load_lbs_weights: true
+    load_supervision: false
+    load_da_pose: false
+    noise_scale: 0.0
+    load_template_uv: true
