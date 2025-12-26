@@ -117,6 +117,8 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
         # this will be tensor of shape [num images, 3, 3]
         # these should be normalized
         intrinsics = torch.from_numpy(np.load(intrinsics_path)).float().to(device)
+        if intrinsics.ndim == 3:
+            intrinsics = intrinsics[None]
         print(f"Loaded intrinsics from {intrinsics_path}")
     else: # dummy defaults
         print(f"No intrinsics found at {intrinsics_path}. Using dummy intrinsics.")
@@ -130,6 +132,8 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
         # this will be tensor of shape [num images, 4, 4]
         # these should be in OpenCV c2w format
         extrinsics = torch.from_numpy(np.load(extrinsics_path)).float().to(device)
+        if extrinsics.ndim == 3:
+            extrinsics = extrinsics[None]
         print(f"Loaded extrinsics from {extrinsics_path}")
     else:
         extrinsics = None
