@@ -6,3 +6,4 @@ tmp
 tmp/
 pretrained_weights
 pretrained_weights/
+.vscode/
