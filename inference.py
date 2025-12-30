@@ -14,6 +14,9 @@ import numpy as np
 from PIL import Image
 from typing import List, Optional
 from omegaconf import OmegaConf
+import src.model.decoder as decoder_module
+from src.misc.body_utils import apply_lbs_to_gaussians
+import torch.nn.functional as F
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -46,6 +49,90 @@ src.misc.utils.inverse_normalize = safe_inverse_normalize
 import src.model.encoder as encoder_module
 from src.misc.image_io import save_image
 from src.dataset.data_module import get_data_shim
+import struct
+
+def save_as_ply(means, covariances, harmonics, opacities, output_path):
+    """
+    Saves Gaussians to a PLY file that is fully compatible with 
+    Standard 3DGS viewers (Inria, SIBR, antimatter15, Polycam, etc.)
+    """
+    from scipy.spatial.transform import Rotation
+    import struct
+
+    # 1. Decompose covariances to scales and quaternions
+    print("Decomposing covariances...")
+    cov_flat = covariances.reshape(-1, 3, 3).cpu().numpy()
+    
+    quaternions = []
+    scales = []
+    
+    for cov in cov_flat:
+        # Eigendecomposition
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        scale = np.sqrt(np.maximum(eigenvalues, 1e-7))
+        # Ensure right-handed coordinate system
+        if np.linalg.det(eigenvectors) < 0:
+            eigenvectors[:, 0] *= -1
+        
+        rot = Rotation.from_matrix(eigenvectors)
+        quat = rot.as_quat()  # (x, y, z, w)
+        # Standard GS PLY format expects (w, x, y, z)
+        quaternions.append([quat[3], quat[0], quat[1], quat[2]])
+        scales.append(scale)
+    
+    quaternions = np.array(quaternions)
+    scales = np.array(scales)
+    
+    # 2. Prepare Spherical Harmonics
+    # Standard format splits DC (first 3) from the rest
+    sh_coeffs = harmonics.cpu().numpy() # [N, 3, 16]
+    f_dc = sh_coeffs[:, :, 0] # [N, 3]
+    f_rest = sh_coeffs[:, :, 1:].transpose(0, 2, 1).reshape(len(sh_coeffs), -1) # [N, 45]
+    
+    # 3. Prepare Opacity (as logit)
+    opacities_np = opacities.cpu().numpy()
+    # Standard GS stores the raw logit, which the renderer sigmoids
+    opacity_logit = np.log(opacities_np / (1 - opacities_np + 1e-7))
+    
+    # 4. Write PLY
+    N = means.shape[0]
+    means_np = means.cpu().numpy()
+    num_f_rest = f_rest.shape[1]
+    
+    print(f"Saving {N} Gaussians to {output_path} (Standard Format)...")
+    with open(output_path, 'wb') as f:
+        # Header
+        f.write(b"ply\n")
+        f.write(b"format binary_little_endian 1.0\n")
+        f.write(f"element vertex {N}\n".encode())
+        f.write(b"property float x\n")
+        f.write(b"property float y\n")
+        f.write(b"property float z\n")
+        f.write(b"property float nx\n") # Normals (unused but standard)
+        f.write(b"property float ny\n")
+        f.write(b"property float nz\n")
+        for i in range(3): f.write(f"property float f_dc_{i}\n".encode())
+        for i in range(num_f_rest): f.write(f"property float f_rest_{i}\n".encode())
+        f.write(b"property float opacity\n")
+        for i in range(3): f.write(f"property float scale_{i}\n".encode())
+        for i in range(4): f.write(f"property float rot_{i}\n".encode())
+        f.write(b"end_header\n")
+        
+        # Packing: 3(pos) + 3(norm) + 3(dc) + 45(rest) + 1(opacity) + 3(scale) + 4(rot) = 62 items
+        fmt = '<' + 'f' * (3 + 3 + 3 + num_f_rest + 1 + 3 + 4)
+        
+        for i in range(N):
+            data = [
+                *means_np[i], 0, 0, 0, # Pos + Dummy Normal
+                *f_dc[i],              # SH DC
+                *f_rest[i],            # SH Rest
+                opacity_logit[i],      # Opacity
+                *np.log(scales[i]),    # Scale
+                *quaternions[i]        # Rotation
+            ]
+            f.write(struct.pack(fmt, *data))
+            
+    print(f"✓ Saved Standard 3DGS PLY to {output_path}")
 
 def load_and_preprocess_image(image_path: str, target_size: tuple = (1024, 1024)) -> np.ndarray:
     img = Image.open(image_path).convert('RGB')
@@ -82,6 +169,7 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
             img2.jpg (or .png)
         (intrinsics.npy)
         (extrinsics.npy)
+        (smplx_params.npz)
         (test/)
     """
     img_dir = Path(input_dir) / 'images'
@@ -91,10 +179,12 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
 
     intrinsics_path = Path(input_dir) / 'intrinsics.npy'
     extrinsics_path = Path(input_dir) / 'extrinsics.npy'
+    smplx_params_path = Path(input_dir) / 'smplx_params.npz'
     test_dir = Path(input_dir) / 'test'
 
     intrinsics_path = intrinsics_path if intrinsics_path.exists() else None
     extrinsics_path = extrinsics_path if extrinsics_path.exists() else None
+    smplx_params_path = smplx_params_path if smplx_params_path.exists() else None
     test_dir = test_dir if test_dir.exists() and test_dir.is_dir() else None
 
     # these are required!
@@ -138,8 +228,15 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
     else:
         extrinsics = None
 
+    # load smplx params if available
+    if smplx_params_path is not None:
+        smplx_params = np.load(smplx_params_path)
+        print(f"Loaded smplx params from {smplx_params_path}")
+    else:
+        smplx_params = None
+
     # can recursively call 'test_dir' to load test views with the same logic above
-    return images, masks, intrinsics, extrinsics, test_dir
+    return images, masks, intrinsics, extrinsics, smplx_params, test_dir
 
 def run_inference(
     input_dir: str,
@@ -171,7 +268,7 @@ def run_inference(
 
     # load image + mask data provided from user (and test/ if provided)
     print(f"Loading data from {input_dir}...")
-    images, masks, intrinsics, extrinsics, test_dir = load_data_dir(input_dir, image_size, device)
+    images, masks, intrinsics, extrinsics, smplx_params, test_dir = load_data_dir(input_dir, image_size, device)
     num_v = len(images) # number of input views
 
     # Initialize Model
@@ -191,7 +288,9 @@ def run_inference(
         'near': torch.ones(1, num_v, device=device) * 0.1,
         'far': torch.ones(1, num_v, device=device) * 100.0,
         'overlap': torch.ones(1, num_v, num_v, device=device),
-        'use_smplx': torch.ones(1, num_v, dtype=torch.bool, device=device)
+        'use_smplx': torch.ones(1, num_v, dtype=torch.bool, device=device),
+        'cnl_Rs': torch.tensor(smplx_params['cnl_Rs']).to(device) if smplx_params is not None else None,
+        'cnl_Ts': torch.tensor(smplx_params['cnl_Ts']).to(device) if smplx_params is not None else None,
     }
     
     # Add template data
@@ -206,21 +305,44 @@ def run_inference(
     print("Running inference...")
     with torch.no_grad():
         step = ckpt.get('global_step', 100000)
-        gaussians, _, _ = encoder(batch, global_step=step, return_complete_gaussians=True)
+        gaussians = encoder(batch, global_step=step)
 
-    # Save results (stored in gaussians.npz)
+    # Save canonical results (stored in gaussians.npz)
+    # ! this saves gaussians in canonical average body T-pose
     means = gaussians.means[0].cpu().numpy()
     valid = np.linalg.norm(means, axis=-1) < 1e7
-    np.savez(output_path / 'gaussians.npz', 
+    np.savez(output_path / 'cnl_gaussians.npz', 
              means=means[valid], 
              covariances=gaussians.covariances[0].cpu().numpy()[valid],
              harmonics=gaussians.harmonics[0].cpu().numpy()[valid],
              opacities=gaussians.opacities[0].cpu().numpy()[valid])
-    print(f"✓ Success! Output saved to {output_dir}/gaussians.npz")
+             
+    print(f"✓ Success! Output saved to {output_dir}/cnl_gaussians.npz")
+
+    # * PLY export that uses smplx 'betas' to warp the template body to subject identity
+    curr_cnl_Rs = context['cnl_Rs'][:, 0].clone().detach().to(device)
+    curr_cnl_Ts = context['cnl_Ts'][:, 0].clone().detach().to(device)
+    shaped_means, shaped_covs = apply_lbs_to_gaussians(
+        gaussians.means,
+        gaussians.covariances,
+        curr_cnl_Rs,
+        curr_cnl_Ts,
+        F.softmax(gaussians.lbs_weights_bones, dim=-1) # Shape-specific weights
+    )
+
+    save_as_ply(
+        shaped_means[0][valid], 
+        shaped_covs[0][valid], 
+        gaussians.harmonics[0][valid], 
+        gaussians.opacities[0][valid], 
+        output_path / 'gaussians.ply'
+    )
+
+    print(f"✓ Success! PLY saved to {output_dir}/gaussians.ply")
 
     # render test views if provided
     if render and test_dir:
-        test_images, test_masks, test_intrinsics, test_extrinsics, _ = load_data_dir(test_dir, image_size, device)
+        test_images, test_masks, test_intrinsics, test_extrinsics, _, _ = load_data_dir(test_dir, image_size, device)
         assert test_intrinsics is not None
         assert test_extrinsics is not None
 
@@ -303,7 +425,7 @@ def update_cfg_with_defaults(encoder_cfg, state_dict: dict, image_size: tuple = 
 
     # update token count depending on config settings
     token_count = state_dict.get('encoder.backbone.template_embed', torch.zeros(4096)).shape[0]
-    embed_loc = 'encoder' if token_count == 4097 else 'none'
+    embed_loc = 'none'
     encoder_cfg.intrinsics_embed_loc = embed_loc
     encoder_cfg.backbone.intrinsics_embed_loc = embed_loc
     encoder_cfg.backbone.intrinsics_embed_type = 'token'

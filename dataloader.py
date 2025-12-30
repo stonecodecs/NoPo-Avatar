@@ -19,6 +19,9 @@ from torch.utils.data import Dataset, DataLoader, RandomSampler
 from PIL import Image
 import torchvision.transforms.v2 as T
 import torch.nn.functional as F
+from smplx import SMPLX
+from mocap2smplx_kit.easymocap2smplx import convert_easymocap_to_smplx
+from src.misc.body_utils import get_canonical_tfms
 
 # Optional dependencies
 try:
@@ -770,6 +773,19 @@ class MVHumanNetDataset(Dataset):
 
         if self.pre_scale_intrinsics != 0.5:
             print("WARNING: pre_scale_intrinsics is not 0.5, which is expected for MVHumanNet!")
+
+        # Initialize SMPL-X models following src/model/model_wrapper.py
+        MODEL_DIR = "datasets/smplx"
+        self.smplx_model = SMPLX(
+            model_path=os.path.join(MODEL_DIR, 'SMPLX_NEUTRAL.npz'),
+            use_pca=False,
+            num_pca_comps=12,
+            num_betas=10,
+            flat_hand_mean=True)
+
+        smplx_template = SMPLX(model_path=os.path.join(MODEL_DIR, 'SMPLX_MALE.npz'))
+        self.template_tpose_joints = smplx_template().joints.detach().cpu()[0, :55]
+
         print("MVHN::init done!")
 
     def _clean_camera_keys(self, data):
@@ -1324,6 +1340,15 @@ class MVHumanNetDataset(Dataset):
                     sapiens_conditionings[cond].append(cond_tensor)
         return sapiens_conditionings
 
+    def _get_smplx_params(self, subject_id, timestep):
+        """Get SMPLX parameters. TEMPORARY SOLUTION! """
+        # read from dataset
+        smplx_params_path = os.path.join(self.root_dir, subject_id, 'smplx', 'smpl', f"{(timestep):06d}.json")
+        with open(smplx_params_path, 'r') as f:
+            smplx_params = json.load(f)[0]
+        smplx_params = convert_easymocap_to_smplx(smplx_params, 'datasets/smplx/SMPLX_NEUTRAL.npz')
+        return smplx_params
+
     def __len__(self):
         return len(self.scenes)
 
@@ -1512,6 +1537,21 @@ class MVHumanNetDataset(Dataset):
                 repeat(ref_mask, "n -> n 1 h w", h=pluckers.shape[2], w=pluckers.shape[3]),
             ], dim=1)
 
+        # lastly, add SMPLX parameters
+        # Ex. timestep=0015 => (int(0015) // 5) - 1 = 000002.json
+        smplx_params = self._get_smplx_params(subject_id, (int(timestep) // 5) - 1)
+        
+        # Get subject T-pose joints from betas to compute canonical transforms
+        betas = torch.tensor(smplx_params['betas']).float()
+        if betas.ndim == 1:
+            betas = betas.unsqueeze(0)
+            
+        with torch.no_grad():
+            output = self.smplx_model(betas=betas, return_full_pose=True)
+        subject_tpose_joints = output.joints[0, :55].detach().cpu()
+        
+        cnl_Rs, cnl_Ts = get_canonical_tfms(self.template_tpose_joints, subject_tpose_joints, use_smplx=True)
+
         try:
             output_dict = {
                 "clean_latent": clean_latents,
@@ -1530,6 +1570,9 @@ class MVHumanNetDataset(Dataset):
                 "face_bbox": face_bboxes_adjusted,
                 "subject_id": subject_id,
                 "timestep": timestep,
+                "smplx": smplx_params,
+                "cnl_Rs": cnl_Rs,
+                "cnl_Ts": cnl_Ts,
             }
 
             if self.arcface_embeddings_dir is not None:
