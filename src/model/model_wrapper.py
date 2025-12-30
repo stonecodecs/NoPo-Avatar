@@ -28,6 +28,7 @@ from ..global_cfg import get_cfg
 from ..loss import Loss
 from ..loss.loss_point import Regr3D
 from ..loss.loss_ssim import ssim
+from ..loss.loss_weighting import SimVSWeighting, get_loss_weighting
 from ..misc.benchmarker import Benchmarker
 from ..misc.cam_utils import update_pose, get_pnp_pose, get_camrot, rotate_camera_by_frame_idx
 from ..misc.image_io import prep_image, save_image, save_video
@@ -174,6 +175,73 @@ class ModelWrapper(LightningModule):
         smplx = SMPLX(model_path=os.path.join(MODEL_DIR, 'SMPLX_MALE.npz'))
         self.template_tpose_joints = smplx().joints.detach().cpu()[0, :55]
         self.pose_mean = smplx.pose_mean.cuda()
+        
+        # Initialize loss weighting strategy (default: SimVS with max_weight=5.0)
+        # Can be configured to use different strategies:
+        # - "uniform": all frames weighted equally
+        # - "simvs": distance-based + reference exclusion (recommended)
+        self.loss_weighting = get_loss_weighting(strategy="simvs", max_weight=5.0)
+
+    def get_reference_indices(self, batch: BatchedExample) -> torch.Tensor | None:
+        """Extract indices of reference images from reference_mask.
+        
+        Args:
+            batch: BatchedExample containing optional reference_mask
+            
+        Returns:
+            Tensor of shape (num_references, 2) with [batch_idx, view_idx] of reference images,
+            or None if no reference_mask is provided
+        """
+        if "reference_mask" not in batch["context"] and "reference_mask" not in batch["target"]:
+            return None
+        
+        # Check context views for reference mask
+        if "reference_mask" in batch["context"]:
+            # reference_mask shape: (b, v) - boolean tensor
+            mask = batch["context"]["reference_mask"]
+            reference_indices = (mask > 0).nonzero(as_tuple=False)  # (num_refs, 2) where [:,0] is batch, [:,1] is view
+            return reference_indices
+        
+        return None
+    
+    def compute_loss_weights(
+        self, 
+        batch: BatchedExample,
+        num_views: int,
+    ) -> Float[Tensor, "batch view"] | None:
+        """
+        Compute per-view loss weights based on reference_mask and input patterns.
+        
+        Args:
+            batch: BatchedExample with optional reference_mask
+            num_views: Number of views in the batch
+            
+        Returns:
+            Weight tensor of shape (batch, view) or None if no reference_mask
+            
+        Notes:
+            Uses SimVSWeighting by default:
+            - Reference frames get weight 0 (they're clean/ground truth)
+            - Other frames weighted by distance from input frames
+            - Frames farther from inputs get higher weight (up to max_weight=5.0)
+        """
+        if "reference_mask" not in batch["context"]:
+            return None
+        
+        ref_mask = batch["context"]["reference_mask"]  # (batch, view)
+        batch_size = ref_mask.shape[0]
+        
+        # Create input_mask: assume first view is always input, or use custom logic
+        # For now, we'll treat the first view as input frame
+        # You can customize this based on your dataset's structure
+        device = ref_mask.device
+        input_mask = torch.zeros(batch_size, num_views, dtype=torch.bool, device=device)
+        input_mask[:, 0] = True  # First view is input
+        
+        # Compute weights using the configured strategy
+        weights = self.loss_weighting(ref_mask=ref_mask, input_mask=input_mask)
+        
+        return weights
 
     def training_step(self, batch, batch_idx):
         # combine batch from different dataloaders
@@ -234,6 +302,9 @@ class ModelWrapper(LightningModule):
         # unprepare the image for rendering
         batch["context"]["image"] = inverse_normalize(batch["context"]["image"], self.encoder.cfg.input_mean, self.encoder.cfg.input_std)
 
+        # Check if reference mask is provided for reference-specific loss computation
+        reference_indices = self.get_reference_indices(batch)
+        
         # Compute and log loss.
         total_loss = 0
         loss_dict = {}
@@ -246,6 +317,17 @@ class ModelWrapper(LightningModule):
                 loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
             loss_dict[loss_fn.name] = loss
+
+            # Optional: Apply reference-specific losses if reference_mask is provided
+            # If reference_indices is not None, you can compute additional losses
+            # specifically for reference images to enforce consistency
+            if reference_indices is not None and loss_fn.name in ["lpips", "mse", "ssim"]:
+                # Example: Compute loss only on reference views
+                # This could be used to ensure reference image quality
+                # reference_loss = self._compute_reference_loss(output, batch, loss_fn, reference_indices)
+                # self.log(f"loss/{loss_fn.name}_reference", reference_loss)
+                # loss = loss + reference_loss
+                pass
 
             loss_aux = 0.
             if "output_img" in output_aux and loss_fn.name in ["lpips", "mse", "ssim"]:

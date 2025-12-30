@@ -21,6 +21,7 @@ class BatchedViews(TypedDict, total=False):
     far: Float[Tensor, "batch _"]  # batch view
     index: Int64[Tensor, "batch _"]  # batch view
     overlap: Float[Tensor, "batch _"]  # batch view
+    reference_mask: Float[Tensor, "batch _"]  # batch view - boolean indicator for reference image
 
 
 class BatchedExample(TypedDict, total=False):
@@ -36,6 +37,7 @@ class UnbatchedViews(TypedDict, total=False):
     near: Float[Tensor, " _"]
     far: Float[Tensor, " _"]
     index: Int64[Tensor, " _"]
+    reference_mask: Float[Tensor, " _"]  # boolean indicator for reference image
 
 
 class UnbatchedExample(TypedDict, total=False):

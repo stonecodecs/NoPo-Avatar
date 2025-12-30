@@ -9,6 +9,12 @@ from .loss_projection import LossProjection, LossProjectionCfgWrapper
 from .loss_projection2 import LossProjection2, LossProjection2CfgWrapper
 from .loss_pts3d import LossPts3D, LossPts3DCfgWrapper
 from .loss_chamfer2d import LossChamfer2D, LossChamfer2DCfgWrapper
+from .loss_weighting import (
+    LossWeighting,
+    UniformWeighting,
+    SimVSWeighting,
+    get_loss_weighting,
+)
 
 LOSSES = {
     LossDepthCfgWrapper: LossDepth,
