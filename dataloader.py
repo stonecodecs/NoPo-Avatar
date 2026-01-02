@@ -19,9 +19,6 @@ from torch.utils.data import Dataset, DataLoader, RandomSampler
 from PIL import Image
 import torchvision.transforms.v2 as T
 import torch.nn.functional as F
-from smplx import SMPLX
-from mocap2smplx_kit.easymocap2smplx import convert_easymocap_to_smplx
-from src.misc.body_utils import get_canonical_tfms
 
 # Optional dependencies
 try:
@@ -773,19 +770,6 @@ class MVHumanNetDataset(Dataset):
 
         if self.pre_scale_intrinsics != 0.5:
             print("WARNING: pre_scale_intrinsics is not 0.5, which is expected for MVHumanNet!")
-
-        # Initialize SMPL-X models following src/model/model_wrapper.py
-        MODEL_DIR = "datasets/smplx"
-        self.smplx_model = SMPLX(
-            model_path=os.path.join(MODEL_DIR, 'SMPLX_NEUTRAL.npz'),
-            use_pca=False,
-            num_pca_comps=12,
-            num_betas=10,
-            flat_hand_mean=True)
-
-        smplx_template = SMPLX(model_path=os.path.join(MODEL_DIR, 'SMPLX_MALE.npz'))
-        self.template_tpose_joints = smplx_template().joints.detach().cpu()[0, :55]
-
         print("MVHN::init done!")
 
     def _clean_camera_keys(self, data):
@@ -1219,10 +1203,33 @@ class MVHumanNetDataset(Dataset):
             face_bboxes_adjusted = face_params * scale_amount
 
         if self.random_crop or self.maximal_crop:
-            frames = [self.transform(frame) for frame in frames]
-            frames = torch.stack(frames, dim=0)
-            image_masks = [self.mask_transform(img_mask) for img_mask in image_masks]
-            image_masks = torch.stack(image_masks, dim=0)
+            # Ensure all frames are tensors before transforming
+            transformed_frames = []
+            for frame in frames:
+                # If frame is a PIL Image, convert it first
+                if hasattr(frame, 'size') and not isinstance(frame, torch.Tensor):
+                    # It's a PIL Image, convert to tensor first
+                    frame = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(frame)
+                transformed_frame = self.transform(frame)
+                # Ensure the result is a tensor
+                if not isinstance(transformed_frame, torch.Tensor):
+                    transformed_frame = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(transformed_frame)
+                transformed_frames.append(transformed_frame)
+            frames = torch.stack(transformed_frames, dim=0)
+            
+            # Ensure all masks are tensors before transforming
+            transformed_masks = []
+            for img_mask in image_masks:
+                # If mask is a PIL Image, convert it first
+                if hasattr(img_mask, 'size') and not isinstance(img_mask, torch.Tensor):
+                    # It's a PIL Image, convert to tensor first
+                    img_mask = T.Compose([T.ToImage()])(img_mask)
+                transformed_mask = self.mask_transform(img_mask)
+                # Ensure the result is a tensor
+                if not isinstance(transformed_mask, torch.Tensor):
+                    transformed_mask = T.Compose([T.ToImage()])(transformed_mask)
+                transformed_masks.append(transformed_mask)
+            image_masks = torch.stack(transformed_masks, dim=0)
             
             ic_rgb_tensor = torch.zeros((self.num_images, 3, self.target_shape[0], self.target_shape[1]), dtype=torch.float32)
             for i, (ic_image, bbox, is_ref, is_iclight, is_infu) in enumerate(zip(ic_rgb, rel_bbox, ref_mask, ic_masks['iclight'], ic_masks['infu'])):
@@ -1262,10 +1269,33 @@ class MVHumanNetDataset(Dataset):
             ic_rgb = ic_rgb_tensor
         else:
             frames = self.transform(frames)
-            ic_rgb = [self.transform(ic_image) for ic_image in ic_rgb]
-            ic_rgb = torch.stack(ic_rgb, dim=0)
+            # Ensure all ic_rgb images are tensors before transforming and stacking
+            transformed_ic_rgb = []
+            for ic_image in ic_rgb:
+                # If ic_image is a PIL Image, convert it first
+                if hasattr(ic_image, 'size') and not isinstance(ic_image, torch.Tensor):
+                    # It's a PIL Image, convert to tensor first
+                    ic_image = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(ic_image)
+                transformed_ic = self.transform(ic_image)
+                # Ensure the result is a tensor
+                if not isinstance(transformed_ic, torch.Tensor):
+                    transformed_ic = T.Compose([T.ToImage(), T.ToDtype(torch.float32, scale=True)])(transformed_ic)
+                transformed_ic_rgb.append(transformed_ic)
+            ic_rgb = torch.stack(transformed_ic_rgb, dim=0)
             image_masks = self.mask_transform(image_masks)
-            image_masks = torch.stack(image_masks, dim=0)
+            # image_masks should already be a tensor from mask_transform, but ensure it is
+            if not isinstance(image_masks, torch.Tensor):
+                # If it's a list, transform each and stack
+                if isinstance(image_masks, list):
+                    transformed_masks = []
+                    for mask in image_masks:
+                        if hasattr(mask, 'size') and not isinstance(mask, torch.Tensor):
+                            mask = T.Compose([T.ToImage()])(mask)
+                        transformed_mask = self.mask_transform(mask) if not isinstance(mask, torch.Tensor) else mask
+                        if not isinstance(transformed_mask, torch.Tensor):
+                            transformed_mask = T.Compose([T.ToImage()])(transformed_mask)
+                        transformed_masks.append(transformed_mask)
+                    image_masks = torch.stack(transformed_masks, dim=0)
 
             if self.use_sapiens_conditioning is not None:
                 for cond in self.use_sapiens_conditioning:
@@ -1339,15 +1369,6 @@ class MVHumanNetDataset(Dataset):
                         cond_tensor = cond_tensor.unsqueeze(0)
                     sapiens_conditionings[cond].append(cond_tensor)
         return sapiens_conditionings
-
-    def _get_smplx_params(self, subject_id, timestep):
-        """Get SMPLX parameters. TEMPORARY SOLUTION! """
-        # read from dataset
-        smplx_params_path = os.path.join(self.root_dir, subject_id, 'smplx', 'smpl', f"{(timestep):06d}.json")
-        with open(smplx_params_path, 'r') as f:
-            smplx_params = json.load(f)[0]
-        smplx_params = convert_easymocap_to_smplx(smplx_params, 'datasets/smplx/SMPLX_NEUTRAL.npz')
-        return smplx_params
 
     def __len__(self):
         return len(self.scenes)
@@ -1537,21 +1558,6 @@ class MVHumanNetDataset(Dataset):
                 repeat(ref_mask, "n -> n 1 h w", h=pluckers.shape[2], w=pluckers.shape[3]),
             ], dim=1)
 
-        # lastly, add SMPLX parameters
-        # Ex. timestep=0015 => (int(0015) // 5) - 1 = 000002.json
-        smplx_params = self._get_smplx_params(subject_id, (int(timestep) // 5) - 1)
-        
-        # Get subject T-pose joints from betas to compute canonical transforms
-        betas = torch.tensor(smplx_params['betas']).float()
-        if betas.ndim == 1:
-            betas = betas.unsqueeze(0)
-            
-        with torch.no_grad():
-            output = self.smplx_model(betas=betas, return_full_pose=True)
-        subject_tpose_joints = output.joints[0, :55].detach().cpu()
-        
-        cnl_Rs, cnl_Ts = get_canonical_tfms(self.template_tpose_joints, subject_tpose_joints, use_smplx=True)
-
         try:
             output_dict = {
                 "clean_latent": clean_latents,
@@ -1570,9 +1576,6 @@ class MVHumanNetDataset(Dataset):
                 "face_bbox": face_bboxes_adjusted,
                 "subject_id": subject_id,
                 "timestep": timestep,
-                "smplx": smplx_params,
-                "cnl_Rs": cnl_Rs,
-                "cnl_Ts": cnl_Ts,
             }
 
             if self.arcface_embeddings_dir is not None:
