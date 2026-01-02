@@ -12,7 +12,7 @@ from einops import repeat
 from tqdm import tqdm
 from typing import Tuple, Optional, Dict, Union, Callable, List
 from math import isclose
-
+from utils.easymocap2smplx import convert_easymocap_to_smplx
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, RandomSampler
@@ -40,6 +40,7 @@ try:
 except ImportError:
     HAS_DATASETS = False
     load_from_disk = None
+    smplx_default_path = "datasets/smplx/SMPLX_MALE.npz"
 
 # ============================================================================
 # Preprocessing Functions (from seva/data/preprocessing.py)
@@ -614,7 +615,8 @@ class MVHumanNetDataset(Dataset):
         fixed_sampling_ids=None,
         use_sapiens_conditioning=None,
         sapiens_segmentation_channels_to_use=[],
-        force_face_ref=False
+        force_face_ref=False,
+        target_shape=(576, 576)
     ):
         self.root_dir = root_dir
         self.latents_dir = latents_dir
@@ -735,7 +737,7 @@ class MVHumanNetDataset(Dataset):
 
         self.downsample_factor = 8
         self.scale_factor = 0.18215
-        self.target_shape = (576, 576)
+        self.target_shape = target_shape
         self.latent_shape = (self.num_images, 4, self.target_shape[0] // self.downsample_factor, 
                           self.target_shape[1] // self.downsample_factor)
 
@@ -1120,7 +1122,8 @@ class MVHumanNetDataset(Dataset):
     def _load_inconsistent_frames(self, img_paths, img_mask_paths, cam_order, subject_id, timestep, ref_mask, ic_masks):
         """Replace sampled MVHN image paths with inconsistent paths."""
         if not self.use_inconsistent:
-            return torch.zeros((self.num_images, 3, self.target_shape[0], self.target_shape[1]), dtype=torch.float32)
+            # Return both ic_rgb and ic_paths (empty list) to match expected unpacking
+            return torch.zeros((self.num_images, 3, self.target_shape[0], self.target_shape[1]), dtype=torch.float32), []
 
         ic_paths = []
         num_infu_frames = ic_masks['infu'].sum().item() if isinstance(ic_masks['infu'], torch.Tensor) else ic_masks['infu'].sum()
@@ -1231,42 +1234,46 @@ class MVHumanNetDataset(Dataset):
                 transformed_masks.append(transformed_mask)
             image_masks = torch.stack(transformed_masks, dim=0)
             
-            ic_rgb_tensor = torch.zeros((self.num_images, 3, self.target_shape[0], self.target_shape[1]), dtype=torch.float32)
-            for i, (ic_image, bbox, is_ref, is_iclight, is_infu) in enumerate(zip(ic_rgb, rel_bbox, ref_mask, ic_masks['iclight'], ic_masks['infu'])):
-                ic_image = torch.nn.functional.interpolate(ic_image.unsqueeze(0), size=(self.target_shape[0], self.target_shape[1]), mode='bilinear', align_corners=False).squeeze(0)
-                dx1, dy1, dx2, dy2 = bbox.int()
-                ic_image_ = ic_image[:,0+dy1:self.target_shape[0]+dy2, 0+dx1:self.target_shape[1]+dx2]
-                ic_image_ = self.transform(ic_image_)
-                ic_rgb_tensor[i] = ic_image_
+            if self.use_inconsistent:
+                ic_rgb_tensor = torch.zeros((self.num_images, 3, self.target_shape[0], self.target_shape[1]), dtype=torch.float32)
+                for i, (ic_image, bbox, is_ref, is_iclight, is_infu) in enumerate(zip(ic_rgb, rel_bbox, ref_mask, ic_masks['iclight'], ic_masks['infu'])):
+                    # crop ic_rgb images                     
+                    ic_image = torch.nn.functional.interpolate(ic_image.unsqueeze(0), size=(self.target_shape[0], self.target_shape[1]), mode='bilinear', align_corners=False).squeeze(0)
+                    dx1, dy1, dx2, dy2 = bbox.int()
+                    ic_image_ = ic_image[:,0+dy1:self.target_shape[0]+dy2, 0+dx1:self.target_shape[1]+dx2]
+                    ic_image_ = self.transform(ic_image_)
+                    ic_rgb_tensor[i] = ic_image_
 
-                if self.use_sapiens_conditioning is not None:
-                    ref_idx = torch.where(ref_mask == True)[0][0].item()
-                    for cond in self.use_sapiens_conditioning:
-                        cond_tensor = sapiens_conditionings[cond][i]
-                        if ref_idx == i:
-                            padded_img, refbbox = self.cropper._possibly_pad_img(
-                                cond_tensor.unsqueeze(0), 
-                                new_bbox[ref_idx][0].unsqueeze(0), 
-                                new_bbox[ref_idx][1].unsqueeze(0), 
-                                new_bbox[ref_idx][2].unsqueeze(0), 
-                                new_bbox[ref_idx][3].unsqueeze(0)
-                            )
-                            if isinstance(padded_img, list):
-                                padded_img = padded_img[0]
+                    if self.use_sapiens_conditioning is not None:
+                        ref_idx = torch.where(ref_mask == True)[0][0].item()
+                        for cond in self.use_sapiens_conditioning:
+                            cond_tensor = sapiens_conditionings[cond][i]
+                            if ref_idx == i:
+                                padded_img, refbbox = self.cropper._possibly_pad_img(
+                                    cond_tensor.unsqueeze(0), 
+                                    new_bbox[ref_idx][0].unsqueeze(0), 
+                                    new_bbox[ref_idx][1].unsqueeze(0), 
+                                    new_bbox[ref_idx][2].unsqueeze(0), 
+                                    new_bbox[ref_idx][3].unsqueeze(0)
+                                )
+                                if isinstance(padded_img, list):
+                                    padded_img = padded_img[0]
+                                else:
+                                    padded_img = padded_img.squeeze(0)
+                                refbbox = refbbox.squeeze(0).int()
+                                cropped = padded_img[:, refbbox[1]:refbbox[3], refbbox[0]:refbbox[2]]
+                                sapiens_conditionings[cond][ref_idx] = T.Resize((self.target_shape[0], self.target_shape[1]))(cropped)
                             else:
-                                padded_img = padded_img.squeeze(0)
-                            refbbox = refbbox.squeeze(0).int()
-                            cropped = padded_img[:, refbbox[1]:refbbox[3], refbbox[0]:refbbox[2]]
-                            sapiens_conditionings[cond][ref_idx] = T.Resize((self.target_shape[0], self.target_shape[1]))(cropped)
-                        else:
-                            scale = cond_tensor.shape[-2] / self.target_shape[0]
-                            cropped_cond_tensor = cond_tensor[:, 0+int(dy1*scale):int((self.target_shape[0]+dy2)*scale), 0+int(dx1*scale):int((self.target_shape[1]+dx2)*scale)]
-                            sapiens_conditionings[cond][i] = T.Resize((self.target_shape[0], self.target_shape[1]))(cropped_cond_tensor)
-                        if cond == "seg_masks":
-                            sapiens_conditionings[cond][i] = one_hot_encode_segmentation(sapiens_conditionings[cond][i], 28)
+                                scale = cond_tensor.shape[-2] / self.target_shape[0]
+                                cropped_cond_tensor = cond_tensor[:, 0+int(dy1*scale):int((self.target_shape[0]+dy2)*scale), 0+int(dx1*scale):int((self.target_shape[1]+dx2)*scale)]
+                                sapiens_conditionings[cond][i] = T.Resize((self.target_shape[0], self.target_shape[1]))(cropped_cond_tensor)
+                            if cond == "seg_masks":
+                                sapiens_conditionings[cond][i] = one_hot_encode_segmentation(sapiens_conditionings[cond][i], 28)
 
-            sapiens_conditionings = {cond: torch.stack(cond_tensor, dim=0) for cond, cond_tensor in sapiens_conditionings.items()}
-            ic_rgb = ic_rgb_tensor
+                sapiens_conditionings = {cond: torch.stack(cond_tensor, dim=0) for cond, cond_tensor in sapiens_conditionings.items()}
+                ic_rgb = ic_rgb_tensor
+            else: # if not, ic_rgb is the same as frames
+                ic_rgb = frames
         else:
             frames = self.transform(frames)
             # Ensure all ic_rgb images are tensors before transforming and stacking
@@ -1304,8 +1311,8 @@ class MVHumanNetDataset(Dataset):
                         if cond == "seg_masks":
                             cond_tensor = one_hot_encode_segmentation(cond_tensor, 28)
             sapiens_conditionings = {cond: torch.stack(cond_tensor, dim=0) for cond, cond_tensor in sapiens_conditionings.items()}
-
         return frames, image_masks, ic_rgb, Ks, sapiens_conditionings, face_bboxes_adjusted
+
 
     def _get_arcface_embeddings(self, subject_id, timestep, cam_order, input_target_mask, ref_mask, ic_masks):
         """Get ArcFace embeddings."""
@@ -1558,6 +1565,12 @@ class MVHumanNetDataset(Dataset):
                 repeat(ref_mask, "n -> n 1 h w", h=pluckers.shape[2], w=pluckers.shape[3]),
             ], dim=1)
 
+        smplx_path = os.path.join(self.root_dir, subject_id, "smplx", "smpl", f"{int(timestep) // 5 - 1:06d}.json")
+        smplx_data = json.load(open(smplx_path))
+        if isinstance(smplx_data, list):
+            smplx_data = smplx_data[0]
+        smplx_params = convert_easymocap_to_smplx(smplx_data, smplx_default_path="datasets/smplx/SMPLX_MALE.npz")
+
         try:
             output_dict = {
                 "clean_latent": clean_latents,
@@ -1576,6 +1589,7 @@ class MVHumanNetDataset(Dataset):
                 "face_bbox": face_bboxes_adjusted,
                 "subject_id": subject_id,
                 "timestep": timestep,
+                "smplx_params": smplx_params
             }
 
             if self.arcface_embeddings_dir is not None:

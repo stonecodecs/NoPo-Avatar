@@ -1,6 +1,7 @@
 """
-Dataset wrapper for MVHumanNet to match THuman dataset format.
-Transforms MVHumanNet dataloader output to be compatible with the model.
+Wrapper of MVHumanNet dataset to match THuman dataset format for expected model input into NoPo-Avatar.
+Main operations borrowed from 'dataloader.py' with MVHumanNetDataset class.
+Main use for this file is to use SMPLX parameters for canonical transformations and template data.
 """
 
 import torch
@@ -11,48 +12,49 @@ from typing import Optional
 from dataclasses import dataclass
 from pathlib import Path
 from smplx import SMPLX
-
+from utils.easymocap2smplx import convert_easymocap_to_smplx
+from src.misc.body_utils import get_canonical_tfms, get_canonical_global_tfms, body_pose_to_body_RTs, get_global_RTs
 from dataloader import MVHumanNetDataset, custom_collate
-
 
 @dataclass
 class DatasetMVHNCfg:
     """Configuration for MVHumanNet dataset to match THuman interface."""
     name: str = "mvhn"
-    root_dir: str = "/path/to/mvhumannet"
+    root_dir: str = "/workspace/datasetvol/mvhuman_data/mv_captures"
     latents_dir: Optional[str] = None
-    preload_path: str = None
+    preload_path: str = "/workspace/datasetvol/mvhuman_data/preload_paths/shards"
     num_images: int = 3  # number of context views
-    num_target_images: int = 1  # number of target views
     data_limit: Optional[int] = None
     only_include: Optional[list] = None
     exclude: Optional[list] = None
     step_size: int = 60
-    random_crop: bool = False
-    maximal_crop: bool = False
+    random_crop: bool = False # currently, not used, but may be in the future for data augmentation.
+    maximal_crop: bool = True # this should be true by default.
     white_background: bool = False
-    crop_padding: int = 60
-    use_inconsistent: bool = True  # Use iclight/infu for non-reference frames
-    random_crop_prob: float = 0.3
-    ic_sampling_prob: float = 0.7
-    iclight_dataset_path: Optional[str] = None
-    infu_dataset_path: Optional[str] = None
-    face_bbox_dir: Optional[str] = None
-    arcface_embeddings_dir: Optional[str] = None
-    fixed_sampling_ids: Optional[list] = None
-    use_sapiens_conditioning: Optional[list] = None
-    sapiens_segmentation_channels_to_use: list = None
-    force_face_ref: bool = False
-    
+    crop_padding: int = 60 # padding for random crop aligned with IC-light images to mitigate cropping errors in bboxes.
+    use_inconsistent: bool = True # Use iclight/infu for non-reference frames. If False, no ic_rgb will be produced (or it will be a copy of 'frames').
+    random_crop_prob: float = 0.0
+    ic_sampling_prob: float = 1.0 # sample split probability of iclight vs infu
+    iclight_dataset_path: Optional[str] = "/workspace/datasetvol/mvhuman_data/relit_images"
+    infu_dataset_path: Optional[str] = "/workspace/datasetvol/mvhuman_data/inconsistent_images"
+    face_bbox_dir: Optional[str] = None # this is not necessary, stay None
+    arcface_embeddings_dir: Optional[str] = None # stay None
+    fixed_sampling_ids: Optional[list] = None # choose 'N' indices to sample from the original set of 48 views per scene
+    use_sapiens_conditioning: Optional[list] = None # stay None
+    sapiens_segmentation_channels_to_use: list = None # stay None
+    force_face_ref: bool = False # stay None
+    target_shape: tuple = (1024,1024)
     # Camera parameters
     near: float = 0.1
     far: float = 100.0
     
-    # Background color: [R, G, B] in [0, 1] or [-1, -1, -1] for random
+    # SMPLX parameters; must run at NoPo-Avatar fork root
+    smplx_model_path: str = "datasets/smplx/SMPLX_MALE.npz"
+    
+    # Background color: [R, G, B] in [0, 1] or [-1, -1, -1]; this will be black by default
     background_color: list = None
     
     # Image shape
-    original_image_shape: list = None  # [H, W]
     input_image_shape: list = None  # [H, W]
     
     # Template parameters (for canonical space rendering)
@@ -74,9 +76,9 @@ class DatasetMVHN(Dataset):
     
     This dataset:
     - Samples 'n' images (default 3) for context
-    - Keeps one as reference (consistent ground truth)
+    - Keeps one as reference (consistent ground truth, reference image)
     - Others can be inconsistent data (iclight/infu)
-    - Target views are always ground truth
+    - Target views are clean ground truth (no lighting changes)
     
     Note: Unlike THuman which uses IterableDataset for chunk-based loading,
     this uses regular Dataset since MVHumanNetDataset is a regular indexed dataset.
@@ -96,14 +98,19 @@ class DatasetMVHN(Dataset):
         # Set defaults
         if self.cfg.background_color is None:
             self.cfg.background_color = [0, 0, 0]  # Black background
-        if self.cfg.original_image_shape is None:
-            self.cfg.original_image_shape = [576, 576]
         if self.cfg.input_image_shape is None:
             self.cfg.input_image_shape = [576, 576]
         if self.cfg.sapiens_segmentation_channels_to_use is None:
             self.cfg.sapiens_segmentation_channels_to_use = []
         if self.cfg.template_image_shape is None:
             self.cfg.template_image_shape = [1024, 1024]  # Default template resolution
+        
+        # Load SMPLX model for joints computation
+        self.smplx_model = SMPLX(
+            model_path=self.cfg.smplx_model_path,
+            use_pca=False,
+            flat_hand_mean=True
+        )
         
         # Load static template data (same as THuman dataset)
         if self.cfg.load_template_uv:
@@ -146,15 +153,13 @@ class DatasetMVHN(Dataset):
             self.template_stds = torch.stack(self.template_stds)
             self.template_means = torch.stack(self.template_means)
             
-            # Load SMPLX model for T-pose joints
-            MODEL_DIR = "datasets/smplx/"
-            smplx_model = SMPLX(model_path=os.path.join(MODEL_DIR, 'SMPLX_MALE.npz'))
-            canonical_poses = smplx_model.body_pose.detach()
-            canonical_poses.requires_grad = False
-            if self.cfg.load_da_pose:
-                canonical_poses[0, 2] = 1.0
-                canonical_poses[0, 5] = -1.0
-            self.template_tpose_joints = smplx_model(pose=canonical_poses).joints.detach().cpu()[0, :55]
+        # Get template T-pose joints
+        canonical_poses = self.smplx_model.body_pose.detach().clone()
+        canonical_poses.requires_grad = False
+        if self.cfg.load_da_pose:
+            canonical_poses[0, 2] = 1.0
+            canonical_poses[0, 5] = -1.0
+        self.template_tpose_joints = self.smplx_model(body_pose=canonical_poses).joints.detach().cpu()[0, :55]
         
         # Initialize the MVHumanNet dataset
         self.dataset = MVHumanNetDataset(
@@ -183,6 +188,7 @@ class DatasetMVHN(Dataset):
             use_sapiens_conditioning=self.cfg.use_sapiens_conditioning,
             sapiens_segmentation_channels_to_use=self.cfg.sapiens_segmentation_channels_to_use,
             force_face_ref=self.cfg.force_face_ref,
+            target_shape=self.cfg.target_shape,
         )
         
     def __len__(self):
@@ -224,13 +230,13 @@ class DatasetMVHN(Dataset):
         
         MVHumanNet batch contains:
         - frames: [N, 3, H, W] - the images (reference + potentially inconsistent)
-        - frames_masks: [N, H, W] - masks
+        - frames_masks: [N, H, W] - binary image masks
         - c2w: [N, 4, 4] - camera to world matrices
-        - K: [N, 3, 3] - intrinsics
-        - mask: [N] - bool tensor indicating which frames are inputs
+        - K: [N, 3, 3] - intrinsics (should be normalized + post-cropping)
         - ref_mask: [N] - bool tensor indicating which frame is reference
         - ic_rgb: [N, 3, H, W] - inconsistent RGB images
-        - subject_id, timestep, etc.
+        - subject_id: str - subject ID
+        - timestep: int - timestep
         
         THuman format needs:
         - context: dict with extrinsics, intrinsics, Rs, Ts, etc., images, masks
@@ -241,10 +247,10 @@ class DatasetMVHN(Dataset):
         
         try:
             # Validate and convert frames to tensor
-            if 'frames' not in mvhn_batch:
+            if 'frames' not in mvhn_batch: # TODO: frames are 576x576 in MVHN, interpolate to 1024x1024 in orig. dataloader
                 raise ValueError("Missing 'frames' key in batch")
             
-            frames = mvhn_batch['frames']
+            frames = mvhn_batch['frames'] # [N,3,H,W]
             if not isinstance(frames, torch.Tensor):
                 if isinstance(frames, list):
                     # Check if list contains PIL Images or tensors
@@ -260,14 +266,14 @@ class DatasetMVHN(Dataset):
                 raise ValueError(f"frames should be 4D [N, C, H, W], got shape {frames.shape}")
             _, _, h, w = frames.shape
             
-            # Convert c2w to extrinsics (w2c)
-            # THuman uses w2c (world to camera), MVHumanNet returns c2w
-            extrinsics = torch.linalg.inv(mvhn_batch['c2w'])  # [N, 4, 4]
+            # THuman uses C2W (camera to world) for 'extrinsics'
+            # mvhn_batch['c2w'] is already C2W from dataloader
+            extrinsics = mvhn_batch['c2w']  # [N, 4, 4]
             intrinsics = mvhn_batch['K']  # [N, 3, 3]
+            # TODO compare with thuman camera parameters
             
             # Get reference mask and input mask
             ref_mask = mvhn_batch['ref_mask']  # [N] bool
-            input_mask = mvhn_batch['mask']  # [N] bool
             
             # Context views: all sampled views
             context_indices = torch.arange(num_views)
@@ -298,11 +304,12 @@ class DatasetMVHN(Dataset):
                     raise ValueError(f"context_images is not a tensor or list: {type(context_images)}")
             
             # Images for target - always ground truth
+            context_images[ref_mask] = frames[ref_mask] # replace reference frame with GT
             target_images = frames  # Use the already-converted tensor
             
             # Masks
-            context_masks = mvhn_batch['frames_masks']  # [N, H, W]
-            target_masks = mvhn_batch['frames_masks']  # [N, H, W]
+            context_masks = mvhn_batch['frames_masks'].squeeze(1)  # [N, H, W]
+            target_masks = mvhn_batch['frames_masks'].squeeze(1)  # [N, H, W]
             
             # Ensure masks are tensors
             if not isinstance(context_masks, torch.Tensor):
@@ -324,52 +331,77 @@ class DatasetMVHN(Dataset):
             far_target = torch.full((num_views,), self.cfg.far, dtype=torch.float32)
             
             # ========================================================================
-            # TODO: Add SMPLX parameters here when available
-            # These should be loaded from your SMPLX preprocessing/fitting results
+            # SMPLX parameters
             # ========================================================================
+            smplx_params = mvhn_batch['smplx_params']
             
-            # Placeholder Rs and Ts - REPLACE WITH ACTUAL SMPLX PARAMETERS
-            # Rs: rotation matrices for each joint [N, num_joints, 3, 3]
-            # Ts: translations for each joint [N, num_joints, 3]
-            num_joints = 55  # SMPLX has 55 joints (including hand/face joints)
+            # 1. Compute joints for the current pose
+            with torch.no_grad():
+                smplx_output = self.smplx_model(
+                    global_orient=torch.from_numpy(smplx_params['global_orient']).float().unsqueeze(0),
+                    body_pose=torch.from_numpy(smplx_params['body_pose']).float().unsqueeze(0),
+                    left_hand_pose=torch.from_numpy(smplx_params['left_hand_pose']).float().unsqueeze(0),
+                    right_hand_pose=torch.from_numpy(smplx_params['right_hand_pose']).float().unsqueeze(0),
+                    jaw_pose=torch.from_numpy(smplx_params['jaw_pose']).float().unsqueeze(0),
+                    leye_pose=torch.from_numpy(smplx_params['left_eye_pose']).float().unsqueeze(0),
+                    reye_pose=torch.from_numpy(smplx_params['right_eye_pose']).float().unsqueeze(0),
+                    betas=torch.from_numpy(smplx_params['betas']).float().unsqueeze(0),
+                    expression=torch.from_numpy(smplx_params['expression']).float().unsqueeze(0),
+                    transl=torch.from_numpy(smplx_params['transl']).float().unsqueeze(0),
+                    return_full_pose=True
+                )
             
-            # Initialize with identity rotations and zero translations
-            Rs_context = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(num_views, num_joints, 1, 1)
-            Ts_context = torch.zeros(num_views, num_joints, 3)
-            Rs_target = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(num_views, num_joints, 1, 1)
-            Ts_target = torch.zeros(num_views, num_joints, 3)
+            current_joints = smplx_output.joints.detach().cpu()[0, :55]
             
-            # TODO: Load actual SMPLX pose parameters for the timestep
-            # These should come from fitted SMPLX parameters stored for each frame
-            # Example loading code (to be implemented):
-            # smplx_params = load_smplx_params(mvhn_batch['subject_id'], mvhn_batch['timestep'])
-            # Rs_context = smplx_params['global_Rs']  # [N, 55, 3, 3]
-            # Ts_context = smplx_params['global_Ts']  # [N, 55, 3]
+            # 2. Get T-pose joints for this subject (using current betas)
+            with torch.no_grad():
+                tpose_output = self.smplx_model(
+                    betas=torch.from_numpy(smplx_params['betas']).float().unsqueeze(0),
+                    return_full_pose=True
+                )
+            tpose_joints = tpose_output.joints.detach().cpu()[0, :55]
             
-            # Placeholder Rs_tpose and Ts_tpose - T-pose parameters
-            Rs_tpose_context = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(num_views, num_joints, 1, 1)
-            Ts_tpose_context = torch.zeros(num_views, num_joints, 3)
-            Rs_tpose_target = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(num_views, num_joints, 1, 1)
-            Ts_tpose_target = torch.zeros(num_views, num_joints, 3)
+            # 3. Compute Rs and Ts (Global rotation and translation for each joint)
+            # We need to reshape the full pose to [55, 3]
+            full_pose = smplx_output.full_pose.detach().cpu().numpy().reshape(55, 3)
+            # The model expects root rotation to be handled by extrinsics usually, 
+            # but here we follow THuman's global RTs computation.
             
-            # TODO: Load T-pose parameters
-            # These represent the canonical T-pose joint transformations
-            # Example:
-            # tpose_params = load_tpose_params(mvhn_batch['subject_id'])
-            # Rs_tpose_context = tpose_params['Rs']
-            # Ts_tpose_context = tpose_params['Ts']
+            # Compute canonical global transforms for the T-pose joints
+            cnl_gtfms = get_canonical_global_tfms(tpose_joints.numpy(), use_smplx=True)
             
-            # Placeholder cnl_Rs and cnl_Ts - Canonical transformations
-            cnl_Rs_context = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(num_views, num_joints, 1, 1)
-            cnl_Ts_context = torch.zeros(num_views, num_joints, 3)
-            cnl_Rs_target = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(num_views, num_joints, 1, 1)
-            cnl_Ts_target = torch.zeros(num_views, num_joints, 3)
+            # Compute destination Rs and Ts (local)
+            dst_Rs, dst_Ts = body_pose_to_body_RTs(full_pose, tpose_joints.numpy(), use_smplx=True)
             
-            # TODO: Compute canonical transformations
-            # These transform from canonical space to the current pose
-            # They are typically computed from T-pose joints and current joints
-            # Example:
-            # cnl_Rs, cnl_Ts = get_canonical_tfms(template_tpose_joints, current_tpose_joints)
+            # Compute global Rs and Ts
+            global_Rs, global_Ts = get_global_RTs(cnl_gtfms, dst_Rs, dst_Ts, use_smplx=True)
+            
+            # 4. Compute T-pose Rs and Ts (Identity rotations, joints as translations)
+            # In T-pose, joints are just at their canonical positions
+            dst_Rs_tpose, dst_Ts_tpose = body_pose_to_body_RTs(np.zeros((55, 3)), tpose_joints.numpy(), use_smplx=True)
+            global_Rs_tpose, global_Ts_tpose = get_global_RTs(cnl_gtfms, dst_Rs_tpose, dst_Ts_tpose, use_smplx=True)
+            
+            # 5. Compute canonical transformations (cnl_Rs, cnl_Ts)
+            # These transform from the template T-pose to the current subject's T-pose
+            # * unsqueeze(0) to match THuman format
+            cnl_Rs_val, cnl_Ts_val = get_canonical_tfms(self.template_tpose_joints, tpose_joints, use_smplx=True)
+            
+            # 6. Repeat for all views
+            num_joints = 55
+            Rs_context = torch.from_numpy(global_Rs).unsqueeze(0).repeat(num_views, 1, 1, 1)
+            Ts_context = torch.from_numpy(global_Ts).unsqueeze(0).repeat(num_views, 1, 1)
+            Rs_target = Rs_context.clone()
+            Ts_target = Ts_context.clone()
+            
+            Rs_tpose_context = torch.from_numpy(global_Rs_tpose).unsqueeze(0).repeat(num_views, 1, 1, 1)
+            Ts_tpose_context = torch.from_numpy(global_Ts_tpose).unsqueeze(0).repeat(num_views, 1, 1)
+            Rs_tpose_target = Rs_tpose_context.clone()
+            Ts_tpose_target = Ts_tpose_context.clone()
+            
+            cnl_Rs_context = cnl_Rs_val.unsqueeze(0).repeat(num_views, 1, 1, 1)
+            cnl_Ts_context = cnl_Ts_val.unsqueeze(0).repeat(num_views, 1, 1)
+            cnl_Rs_target = cnl_Rs_context.clone()
+            cnl_Ts_target = cnl_Ts_context.clone()
             
             # ========================================================================
             
@@ -386,7 +418,7 @@ class DatasetMVHN(Dataset):
             # Scene name
             scene = mvhn_batch['subject_id']
             
-            # Construct the output in THuman format
+            # Construct the output in THuman format; post-dataloader, these will be in the expected shapes [1,...]
             example = {
                 "context": {
                     "extrinsics": extrinsics[context_indices],  # [N, 4, 4]
@@ -421,8 +453,9 @@ class DatasetMVHN(Dataset):
                     "index": target_indices,  # [N]
                     "use_smplx": True,
                 },
-                "scene": scene,
+                "scene": [scene],
                 "bgcolor": bgcolor,
+                "tpose_joints": tpose_joints,  # Subject-specific T-pose joints
             }
             
             # Add static template information if loaded (same as THuman dataset)
