@@ -522,7 +522,7 @@ CAMERA_TO_INDEX = {cam: idx for idx, cam in enumerate(ALL_CAMERAS)}
 # ============================================================================
 
 def center_cameras(all_c2ws, c2ws):
-    """Finds mean position of all_c2ws, then centers cameras by subtracting the mean."""
+    """Finds mean position of all_c2ws, then centers cameras by subtracting the mean. Returns the center."""
     ref_c2ws = all_c2ws
     camera_dist_2med = torch.norm(
         ref_c2ws[:, :3, 3] - ref_c2ws[:, :3, 3].median(0, keepdim=True).values,
@@ -532,10 +532,12 @@ def center_cameras(all_c2ws, c2ws):
         torch.quantile(camera_dist_2med, 0.97) * 10,
         max=1e6,
     )
-    c2ws[:, :3, 3] -= ref_c2ws[valid_mask, :3, 3].mean(0, keepdim=True)
+    center = ref_c2ws[valid_mask, :3, 3].mean(0, keepdim=True)
+    c2ws[:, :3, 3] -= center
+    return center
 
 def scale_cameras(c2ws, camera_scale=2.0):
-    """Scale camera positions."""
+    """Scale camera positions. Returns the scale factor."""
     camera_dists = c2ws[:, :3, 3].clone()
     translation_scaling_factor = (
         camera_scale
@@ -547,6 +549,7 @@ def scale_cameras(c2ws, camera_scale=2.0):
         else (camera_scale / torch.norm(camera_dists[0]))
     )
     c2ws[:, :3, 3] *= translation_scaling_factor
+    return translation_scaling_factor
 
 def read_from_hdf5(hdf5_file, *args):
     """Read from HDF5 file (nested keys)."""
@@ -1530,8 +1533,8 @@ class MVHumanNetDataset(Dataset):
 
         all_c2ws = torch.from_numpy(all_c2ws).float()
         c2ws = all_c2ws[sample_permutation]
-        center_cameras(all_c2ws, c2ws)
-        scale_cameras(c2ws)
+        center = center_cameras(all_c2ws, c2ws)
+        scale = scale_cameras(c2ws)
 
         w2cs = torch.linalg.inv(c2ws)
         src_camera_idx = input_target_mask.to(torch.int).argmax().item()
@@ -1570,6 +1573,15 @@ class MVHumanNetDataset(Dataset):
         if isinstance(smplx_data, list):
             smplx_data = smplx_data[0]
         smplx_params = convert_easymocap_to_smplx(smplx_data, smplx_default_path="datasets/smplx/SMPLX_MALE.npz")
+        
+        # Apply camera center and scale to SMPLX translation
+        # smplx_params['transl'] is in original world coordinates
+        # We need to apply the same transform: (transl - center) * scale
+        if 'transl' in smplx_params:
+            transl = torch.from_numpy(smplx_params['transl']).float()
+            # center is shape [1, 3], transl is [3] or [1, 3]
+            transl = (transl - center.squeeze(0)) * scale
+            smplx_params['transl'] = transl.numpy()
 
         try:
             output_dict = {
@@ -1589,7 +1601,9 @@ class MVHumanNetDataset(Dataset):
                 "face_bbox": face_bboxes_adjusted,
                 "subject_id": subject_id,
                 "timestep": timestep,
-                "smplx_params": smplx_params
+                "smplx_params": smplx_params,
+                "cam_scale": scale,
+                "cam_center": center
             }
 
             if self.arcface_embeddings_dir is not None:

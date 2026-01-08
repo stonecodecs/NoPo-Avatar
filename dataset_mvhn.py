@@ -268,6 +268,7 @@ class DatasetMVHN(Dataset):
             
             # THuman uses C2W (camera to world) for 'extrinsics'
             # mvhn_batch['c2w'] is already C2W from dataloader
+            # these are scaled + centered already by MVHN dataloader (see dataloader.py)
             extrinsics = mvhn_batch['c2w']  # [N, 4, 4]
             intrinsics = mvhn_batch['K']  # [N, 3, 3]
             # TODO compare with thuman camera parameters
@@ -329,6 +330,8 @@ class DatasetMVHN(Dataset):
             far_context = torch.full((num_views,), self.cfg.far, dtype=torch.float32)
             near_target = torch.full((num_views,), self.cfg.near, dtype=torch.float32)
             far_target = torch.full((num_views,), self.cfg.far, dtype=torch.float32)
+            cam_scale = mvhn_batch['cam_scale'].numpy()
+            cam_center = mvhn_batch['cam_center'].numpy()
             
             # ========================================================================
             # SMPLX parameters
@@ -375,6 +378,7 @@ class DatasetMVHN(Dataset):
             
             # Compute global Rs and Ts
             global_Rs, global_Ts = get_global_RTs(cnl_gtfms, dst_Rs, dst_Ts, use_smplx=True)
+            global_Ts = global_Ts * cam_scale
             
             # 4. Compute T-pose Rs and Ts (Identity rotations, joints as translations)
             # In T-pose, joints are just at their canonical positions
@@ -417,6 +421,18 @@ class DatasetMVHN(Dataset):
             
             # Scene name
             scene = mvhn_batch['subject_id']
+            subject_id = mvhn_batch['subject_id']
+            timestep = mvhn_batch['timestep']
+            ref_mask = mvhn_batch['ref_mask']
+            
+            # Convert smplx_params to torch tensors for consistency (they're numpy arrays from dataloader)
+            # This makes them easier to use in the model and visualization
+            smplx_params_torch = {}
+            for key, value in smplx_params.items():
+                if isinstance(value, np.ndarray):
+                    smplx_params_torch[key] = torch.from_numpy(value).float()
+                else:
+                    smplx_params_torch[key] = torch.tensor(value).float()
             
             # Construct the output in THuman format; post-dataloader, these will be in the expected shapes [1,...]
             example = {
@@ -454,8 +470,15 @@ class DatasetMVHN(Dataset):
                     "use_smplx": True,
                 },
                 "scene": [scene],
+                "subject_id": subject_id,
+                "timestep": timestep,
                 "bgcolor": bgcolor,
                 "tpose_joints": tpose_joints,  # Subject-specific T-pose joints
+                # ! ==== rest of these are debugging; delete later ====
+                "ref_mask": ref_mask,
+                "smplx_params": smplx_params_torch,  # Original SMPLX parameters used to generate Rs/Ts
+                "cam_scale": cam_scale,
+                "cam_center": cam_center,
             }
             
             # Add static template information if loaded (same as THuman dataset)
