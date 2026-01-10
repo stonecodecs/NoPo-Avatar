@@ -22,6 +22,8 @@ from .dataset import DatasetCfgCommon
 from .shims.augmentation_shim import apply_augmentation_shim
 from .shims.crop_shim import apply_crop_shim
 from .shims.color_jitter_shim import apply_color_jitter_shim
+from .shims.inconsistent_image_shim import apply_inconsistent_image_shim
+from .shims.harmonization_shim import apply_harmonization_shim
 from .types import Stage
 from .view_sampler import ViewSampler
 from ..misc.cam_utils import camera_normalization
@@ -55,6 +57,11 @@ class DatasetTHumanCfg(DatasetCfgCommon):
     load_lbs_weights: bool = False
     sample_rate: float = 1.0
     noise_scale: float = 0.0
+    load_inconsistent_images: bool = False
+    inconsistent_images_path: Path | None = None
+    inconsistent_frame_name_format: str = "frame_{:06d}"
+    use_harmonization: bool = False
+    harmonization_default_reference_indices: list[int] | None = None
 
 
 @dataclass
@@ -349,6 +356,22 @@ class DatasetTHuman(IterableDataset):
                     # example["context"].update({
                     #     "lbs_weights": lbs_weights[context_indices]
                     # })
+                # Load inconsistent images if configured
+                if self.cfg.load_inconsistent_images and self.cfg.inconsistent_images_path is not None:
+                    example = apply_inconsistent_image_shim(
+                        example,
+                        inconsistent_base_path=self.cfg.inconsistent_images_path,
+                        stage=self.data_stage,
+                        frame_name_format=self.cfg.inconsistent_frame_name_format,
+                    )
+                
+                # Apply harmonization: mix original and inconsistent images based on reference_mask
+                if self.cfg.use_harmonization:
+                    example = apply_harmonization_shim(
+                        example,
+                        default_reference_indices=self.cfg.harmonization_default_reference_indices,
+                    )
+                
                 if self.stage == "train" and self.cfg.augment:
                     example = apply_augmentation_shim(example)
                     if self.cfg.augment_color_jitter:

@@ -84,17 +84,39 @@ class LossSsim(Loss[LossSsimCfg, LossSsimCfgWrapper]):
         gaussians: Gaussians,
         global_step: int,
         compare_target: bool = True,
-        weight: str = ""
+        weight: str = "",
+        reference_weights: Float[Tensor, "batch view"] | None = None,
     ) -> Float[Tensor, ""] | float:
         weight_suffix = "" if weight == "" else f"_{weight}"
         if getattr(self.cfg, "weight" + weight_suffix) == 0:
             return 0.0
 
-        image = batch["target"]["image"] if compare_target else batch["context"]["image"]
+        if compare_target:
+            image = batch["target"]["image"]
+        else:
+            # Use original images for context comparison (not harmonized)
+            if "image_original" in batch["context"]:
+                image = batch["context"]["image_original"]
+            else:
+                image = batch["context"]["image"]  # Fallback for backward compatibility
 
-        loss_ssim = 1 - ssim(
-            rearrange(prediction.color, "b v c h w -> (b v) c h w"),
-            rearrange(image, "b v c h w -> (b v) c h w")
-        )
+        # Get per-view SSIM values for weighting
+        if reference_weights is not None:
+            # Need per-view SSIM values for weighting
+            loss_ssim = 1 - ssim(
+                rearrange(prediction.color, "b v c h w -> (b v) c h w"),
+                rearrange(image, "b v c h w -> (b v) c h w"),
+                size_average=False  # Returns [B*V] - one value per image
+            )
+            # loss_ssim: [B*V], reference_weights: [B, V]
+            # Reshape loss to [B, V], multiply by weights, keep as [B, V] for mean() at return
+            B, V = reference_weights.shape
+            loss_ssim = loss_ssim.reshape(B, V) * reference_weights
+        else:
+            # Use default averaging (single scalar)
+            loss_ssim = 1 - ssim(
+                rearrange(prediction.color, "b v c h w -> (b v) c h w"),
+                rearrange(image, "b v c h w -> (b v) c h w")
+            )
 
         return getattr(self.cfg, "weight" + weight_suffix) * loss_ssim.mean()

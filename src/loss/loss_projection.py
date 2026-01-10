@@ -34,6 +34,7 @@ class LossProjection(Loss[LossProjectionCfg, LossProjectionCfgWrapper]):
         gaussians: Gaussians,
         global_step: int,
         return_loss_map: bool = False,
+        weights: Float[Tensor, "batch view"] | None = None,
     ):
         warp_by_bone = gaussians.lbs_weights_bones is not None
         b, v, _, h, w = batch["context"]["image"].shape
@@ -87,13 +88,37 @@ class LossProjection(Loss[LossProjectionCfg, LossProjectionCfgWrapper]):
             indices_single = indices_single.float()
             indices_single[:, 1] /= w
             indices_single[:, 2] /= h
-            loss += torch.mean((means_pose_2d - indices_single[:, 1:]) ** 2).clip(max=1)
+            
+            # Compute per-point loss
+            point_loss = (means_pose_2d - indices_single[:, 1:]) ** 2
+            point_loss = point_loss.clip(max=1)  # [N, 2]
+            point_loss = torch.mean(point_loss, dim=-1)  # [N] - mean over x,y coordinates
+            
+            # Apply per-view weights if provided
+            if weights is not None:
+                # indices_single[:, 0] contains view IDs (1-indexed), convert to 0-indexed
+                view_ids = (indices_single[:, 0] - 1).long()  # [N] - view indices (0-indexed)
+                # Get weights for each point based on its view
+                point_weights = weights[i][view_ids]  # [N] - weight for each point
+                # Weight the loss: multiply each point's loss by its view weight
+                weighted_loss = point_loss * point_weights  # [N]
+                loss += torch.mean(weighted_loss)  # Average weighted loss
+            else:
+                # No weights: use uniform weighting (original behavior)
+                loss += torch.mean(point_loss)
 
             if return_loss_map:
                 inds = indices[i][views_single > 0]
                 inds = (inds[:, 0] - 1) * h * w + inds[:, 1] * w + inds[:, 2]
                 loss_map_single = loss_map[i].reshape(-1)
-                loss_map_single[inds] = torch.mean((means_pose_2d - indices_single[:, 1:]) ** 2, dim=-1)
+                # Use the same point_loss computation for consistency
+                if weights is not None:
+                    # Apply weights to loss map as well
+                    view_ids = (indices_single[:, 0] - 1).long()
+                    point_weights = weights[i][view_ids]
+                    loss_map_single[inds] = point_loss * point_weights
+                else:
+                    loss_map_single[inds] = point_loss
                 loss_map[i] = loss_map_single.reshape(v, h, w)
         loss /= b
 

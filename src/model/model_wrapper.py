@@ -305,6 +305,10 @@ class ModelWrapper(LightningModule):
         # Check if reference mask is provided for reference-specific loss computation
         reference_indices = self.get_reference_indices(batch)
         
+        # Compute loss weights for projection loss (SimVS-style weighting)
+        num_views = batch["context"]["image"].shape[1]
+        loss_weights = self.compute_loss_weights(batch, num_views)
+        
         # Compute and log loss.
         total_loss = 0
         loss_dict = {}
@@ -313,6 +317,9 @@ class ModelWrapper(LightningModule):
                 loss = loss_fn.forward(output, batch, gaussians_rgb, self.global_step)
             elif loss_fn.name == "noise":
                 loss = loss_fn.forward(output_aux["output_nosie"], batch, gaussians, self.global_step)
+            elif loss_fn.name == "projection":
+                # Pass weights to projection loss
+                loss = loss_fn.forward(output, batch, gaussians, self.global_step, weights=loss_weights)
             else:
                 loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
@@ -343,7 +350,8 @@ class ModelWrapper(LightningModule):
                 loss_dict[loss_fn.name + "_template"] = loss_template
 
             if "output_context" in output_aux and loss_fn.name in ["lpips", "mse", "ssim"]:
-                loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=False, weight="rgb")
+                loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=False, weight="rgb", 
+                                              reference_weights=loss_weights)
                 self.log(f"loss/{loss_fn.name}_context", loss_context)
                 loss_aux += loss_context
                 loss_dict[loss_fn.name + "_context"] = loss_context

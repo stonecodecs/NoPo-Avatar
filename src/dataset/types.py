@@ -17,6 +17,8 @@ class BatchedViews(TypedDict, total=False):
     extrinsics: Float[Tensor, "batch _ 4 4"]  # batch view 4 4
     intrinsics: Float[Tensor, "batch _ 3 3"]  # batch view 3 3
     image: Float[Tensor, "batch _ _ _ _"]  # batch view channel height width
+    image_original: Float[Tensor, "batch _ _ _ _"]  # batch view channel height width - original images before inconsistent replacement
+    image_inconsistent: Float[Tensor, "batch _ _ _ _"]  # batch view channel height width - inconsistent versions of images
     near: Float[Tensor, "batch _"]  # batch view
     far: Float[Tensor, "batch _"]  # batch view
     index: Int64[Tensor, "batch _"]  # batch view
@@ -34,6 +36,8 @@ class UnbatchedViews(TypedDict, total=False):
     extrinsics: Float[Tensor, "_ 4 4"]
     intrinsics: Float[Tensor, "_ 3 3"]
     image: Float[Tensor, "_ 3 height width"]
+    image_original: Float[Tensor, "_ 3 height width"]  # original images before inconsistent replacement
+    image_inconsistent: Float[Tensor, "_ 3 height width"]  # inconsistent versions of images
     near: Float[Tensor, " _"]
     far: Float[Tensor, " _"]
     index: Int64[Tensor, " _"]

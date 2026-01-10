@@ -1,0 +1,71 @@
+# Example configuration for THuman dataset with SimVS (inconsistent views) training
+# This configuration enables:
+# 1. Loading inconsistent images from disk
+# 2. Harmonization (mixing original and inconsistent images based on reference_mask)
+# 3. Loss weighting (SimVS-style: reference frames get weight 0, others weighted by distance)
+
+defaults:
+  - base_dataset
+  - view_sampler: uniform
+  - optional view_sampler_dataset_specific_config@view_sampler: bounded_re10k
+
+name: thuman
+roots: [datasets/thuman2.0]
+
+relative_pose: false
+make_baseline_1: false
+
+template_image_shape: [256, 256]
+input_image_shape: [256, 256]
+original_image_shape: [1024, 1024]
+cameras_are_circular: true
+
+baseline_min: 1e-3
+baseline_max: 1e10
+max_fov: 100.0
+
+load_lbs_weights: false
+load_supervision: false
+load_da_pose: false
+
+noise_scale: 0.0
+
+# ============================================================================
+# SimVS Configuration
+# ============================================================================
+
+# Enable loading of inconsistent images from disk
+# Expected folder structure: inconsistent_images_path/stage/scene/images/frame_XXXXXX.png
+# Example: /path/to/inconsistent_images/train/subject_001/images/frame_000000.png
+load_inconsistent_images: true
+inconsistent_images_path: datasets/thuman2.0_inconsistent  # Path to inconsistent images folder
+inconsistent_frame_name_format: "frame_{:06d}"  # Format string for frame names (default: "frame_{:06d}")
+
+# Enable harmonization: mix original and inconsistent images based on reference_mask
+# - Context (input): Reference views use original images, non-reference views use inconsistent images
+# - Target (output): All views use original images (ground truth)
+use_harmonization: true
+
+# Default reference indices if reference_mask is not provided in the batch
+# If None, defaults to [0] (first view is reference)
+# If reference_mask is provided in the batch, it takes precedence
+harmonization_default_reference_indices: [0]  # or null to use reference_mask from batch
+
+# ============================================================================
+# Notes:
+# ============================================================================
+# 1. The inconsistent_images_path should contain subdirectories:
+#    - train/scene_name/images/frame_XXXXXX.png
+#    - val/scene_name/images/frame_XXXXXX.png
+#    - test/scene_name/images/frame_XXXXXX.png
+#
+# 2. If inconsistent images are missing for some views, the shim will use
+#    the original images as fallback (training continues normally)
+#
+# 3. Loss weighting is automatically applied to the projection loss when
+#    reference_mask is available in the batch. The weighting strategy is
+#    configured in model_wrapper.py (default: SimVSWeighting with max_weight=5.0)
+#
+# 4. To disable SimVS features, set:
+#    load_inconsistent_images: false
+#    use_harmonization: false

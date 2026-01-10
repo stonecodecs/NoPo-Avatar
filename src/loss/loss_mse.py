@@ -30,13 +30,28 @@ class LossMse(Loss[LossMseCfg, LossMseCfgWrapper]):
         global_step: int,
         compare_target: bool = True,
         weight: str = "",
+        reference_weights: Float[Tensor, "batch view"] | None = None,
     ) -> Float[Tensor, ""]:
-        image = batch["target"]["image"] if compare_target else batch["context"]["image"]
+        if compare_target:
+            image = batch["target"]["image"]
+        else:
+            # Use original images for context comparison (not harmonized)
+            if "image_original" in batch["context"]:
+                image = batch["context"]["image_original"]
+            else:
+                image = batch["context"]["image"]  # Fallback for backward compatibility
         delta = prediction.color - image
         dist = delta ** 2
 
         if self.cfg.use_conf:
             conf = prediction.conf.clamp(min=1.)
             dist = conf * dist - self.cfg.alpha * conf.log()
+
+        # Apply reference weights if provided
+        if reference_weights is not None:
+            # dist: [B, V, 3, H, W], reference_weights: [B, V]
+            # Need to broadcast: [B, V, 1, 1, 1]
+            B, V = reference_weights.shape
+            dist = dist * reference_weights.view(B, V, 1, 1, 1)
 
         return self.cfg.weight * dist.mean()
