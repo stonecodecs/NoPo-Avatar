@@ -121,17 +121,17 @@ def test_apply_inconsistent_image_shim():
             image_path = images_dir / f"frame_{i:06d}.png"
             create_test_image(image_path, color=(100 + i * 50, 100 + i * 50, 100 + i * 50))
         
-        # Create example
+        # Create example (unbatched - per item format as used in dataset)
         example: AnyExample = {
             "context": {
-                "image": torch.rand(1, 2, 3, 256, 256),  # [B, V, C, H, W]
-                "index": torch.tensor([[0, 1]]),  # [B, V]
+                "image": torch.rand(2, 3, 256, 256),  # [V, C, H, W] - no batch dimension
+                "index": torch.tensor([0, 1]),  # [V] - no batch dimension
             },
             "target": {
-                "image": torch.rand(1, 1, 3, 256, 256),
-                "index": torch.tensor([[0]]),
+                "image": torch.rand(1, 3, 256, 256),  # [V, C, H, W] - no batch dimension
+                "index": torch.tensor([0]),  # [V] - no batch dimension
             },
-            "scene": [scene],
+            "scene": scene,  # str, not list - per item format
         }
         
         # Apply shim
@@ -162,18 +162,18 @@ def test_apply_inconsistent_image_shim_missing_images():
         image_path = images_dir / "frame_000000.png"
         create_test_image(image_path, color=(200, 200, 200))
         
-        # Create example
-        original_context_images = torch.rand(1, 2, 3, 256, 256)
+        # Create example (unbatched - per item format as used in dataset)
+        original_context_images = torch.rand(2, 3, 256, 256)  # [V, C, H, W] - no batch dimension
         example: AnyExample = {
             "context": {
                 "image": original_context_images,
-                "index": torch.tensor([[0, 1]]),
+                "index": torch.tensor([0, 1]),  # [V] - no batch dimension
             },
             "target": {
-                "image": torch.rand(1, 1, 3, 256, 256),
-                "index": torch.tensor([[0]]),
+                "image": torch.rand(1, 3, 256, 256),  # [V, C, H, W] - no batch dimension
+                "index": torch.tensor([0]),  # [V] - no batch dimension
             },
-            "scene": [scene],
+            "scene": scene,  # str, not list - per item format
         }
         
         # Apply shim
@@ -186,7 +186,7 @@ def test_apply_inconsistent_image_shim_missing_images():
         # Should still work, with missing images using original as fallback
         assert "image_inconsistent" in result["context"], "Should have image_inconsistent even with missing images"
         # View 0 should have loaded inconsistent image, view 1 should use original
-        assert result["image_inconsistent"].shape == (1, 2, 3, 256, 256), "Should have correct shape"
+        assert result["context"]["image_inconsistent"].shape == (2, 3, 256, 256), "Should have correct shape [V, C, H, W]"
 
 
 if __name__ == "__main__":

@@ -18,11 +18,12 @@ def create_mock_gaussians(batch_size: int = 1, num_gaussians: int = 100, num_vie
     # Create indices: [batch, gaussian, 3] where last dim is [view_id, w, h]
     # View IDs are 1-indexed
     indices = torch.zeros(batch_size, num_gaussians, 3, dtype=torch.long)
-    for i in range(num_gaussians):
-        view_id = (i % num_views) + 1  # 1-indexed view IDs
-        w = (i * 7) % 256
-        h = (i * 11) % 256
-        indices[0, i] = torch.tensor([view_id, w, h])
+    for batch_idx in range(batch_size):
+        for i in range(num_gaussians):
+            view_id = (i % num_views) + 1  # 1-indexed view IDs
+            w = (i * 7 + batch_idx * 13) % 256  # Add batch offset for variety
+            h = (i * 11 + batch_idx * 17) % 256  # Add batch offset for variety
+            indices[batch_idx, i] = torch.tensor([view_id, w, h])
     
     return Gaussians(
         means=torch.randn(batch_size, num_gaussians, 3, device=device),
