@@ -130,7 +130,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("json_path", type=str)
     parser.add_argument("--output", type=str)
-    parser.add_argument("--default-model", type=str, default="SMPLX_MALE.npz")
+    parser.add_argument("--default-model", type=str, default="SMPLX_NEUTRAL.npz")
     parser.add_argument("--zero-hands", action="store_true")
     parser.add_argument("--visualize", action="store_true")
     args = parser.parse_args()

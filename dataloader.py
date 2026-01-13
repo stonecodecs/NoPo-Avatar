@@ -40,7 +40,7 @@ try:
 except ImportError:
     HAS_DATASETS = False
     load_from_disk = None
-    smplx_default_path = "datasets/smplx/SMPLX_MALE.npz"
+    smplx_default_path = "datasets/smplx/SMPLX_NEUTRAL.npz"
 
 # ============================================================================
 # Preprocessing Functions (from seva/data/preprocessing.py)
@@ -1414,7 +1414,7 @@ class MVHumanNetDataset(Dataset):
                 camera_scale = float(row['camera_scale'])
             else:
                 camera_scale = float(row.get('camera_scale', 1.0))
-            
+        
             # Parse annotation bboxes
             if isinstance(row.get('annots_bbox'), str):
                 annots_bbox = json.loads(row['annots_bbox'])
@@ -1522,9 +1522,10 @@ class MVHumanNetDataset(Dataset):
         def get_c2w(cam):
             tf_matrix = create_transform_matrix(
                 np.array(extrinsics[cam]['rotation']),
-                np.array(extrinsics[cam]['translation']) * camera_scale,
+                np.array(extrinsics[cam]['translation']) * camera_scale / 1000.,
                 homogeneous=True
-            )
+            ) # coordinates of translation in 'mm', so we divide by 1000 to get it in 'm' space
+              # we do this to make compatible with SMPLX models (in 'm' space)
             return np.linalg.inv(tf_matrix)
 
         all_c2ws = np.array([
@@ -1534,7 +1535,7 @@ class MVHumanNetDataset(Dataset):
         all_c2ws = torch.from_numpy(all_c2ws).float()
         c2ws = all_c2ws[sample_permutation]
         center = center_cameras(all_c2ws, c2ws)
-        scale = scale_cameras(c2ws)
+        # scale = scale_cameras(c2ws)
 
         w2cs = torch.linalg.inv(c2ws)
         src_camera_idx = input_target_mask.to(torch.int).argmax().item()
@@ -1572,7 +1573,7 @@ class MVHumanNetDataset(Dataset):
         smplx_data = json.load(open(smplx_path))
         if isinstance(smplx_data, list):
             smplx_data = smplx_data[0]
-        smplx_params = convert_easymocap_to_smplx(smplx_data, smplx_default_path="datasets/smplx/SMPLX_MALE.npz")
+        smplx_params = convert_easymocap_to_smplx(smplx_data, smplx_default_path="datasets/smplx/SMPLX_NEUTRAL.npz")
         
         # Apply camera center and scale to SMPLX translation
         # smplx_params['transl'] is in original world coordinates
@@ -1580,7 +1581,7 @@ class MVHumanNetDataset(Dataset):
         if 'transl' in smplx_params:
             transl = torch.from_numpy(smplx_params['transl']).float()
             # center is shape [1, 3], transl is [3] or [1, 3]
-            transl = (transl - center.squeeze(0)) * scale
+            transl = (transl - center.squeeze(0))
             smplx_params['transl'] = transl.numpy()
 
         try:
@@ -1602,7 +1603,6 @@ class MVHumanNetDataset(Dataset):
                 "subject_id": subject_id,
                 "timestep": timestep,
                 "smplx_params": smplx_params,
-                "cam_scale": scale,
                 "cam_center": center
             }
 

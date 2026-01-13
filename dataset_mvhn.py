@@ -49,7 +49,7 @@ class DatasetMVHNCfg:
     far: float = 100.0
     
     # SMPLX parameters; must run at NoPo-Avatar fork root
-    smplx_model_path: str = "datasets/smplx/SMPLX_MALE.npz"
+    smplx_model_path: str = "datasets/smplx/SMPLX_NEUTRAL.npz"
     
     # Background color: [R, G, B] in [0, 1] or [-1, -1, -1]; this will be black by default
     background_color: list = None
@@ -330,7 +330,7 @@ class DatasetMVHN(Dataset):
             far_context = torch.full((num_views,), self.cfg.far, dtype=torch.float32)
             near_target = torch.full((num_views,), self.cfg.near, dtype=torch.float32)
             far_target = torch.full((num_views,), self.cfg.far, dtype=torch.float32)
-            cam_scale = mvhn_batch['cam_scale'].numpy()
+            # cam_scale = mvhn_batch['cam_scale'].numpy()
             cam_center = mvhn_batch['cam_center'].numpy()
             
             # ========================================================================
@@ -378,7 +378,6 @@ class DatasetMVHN(Dataset):
             
             # Compute global Rs and Ts
             global_Rs, global_Ts = get_global_RTs(cnl_gtfms, dst_Rs, dst_Ts, use_smplx=True)
-            global_Ts = global_Ts * cam_scale
             
             # 4. Compute T-pose Rs and Ts (Identity rotations, joints as translations)
             # In T-pose, joints are just at their canonical positions
@@ -477,7 +476,6 @@ class DatasetMVHN(Dataset):
                 # ! ==== rest of these are debugging; delete later ====
                 "ref_mask": ref_mask,
                 "smplx_params": smplx_params_torch,  # Original SMPLX parameters used to generate Rs/Ts
-                "cam_scale": cam_scale,
                 "cam_center": cam_center,
             }
             
