@@ -235,6 +235,19 @@ class DatasetTHuman(IterableDataset):
                     example["masks"][index.item()] for index in target_indices
                 ]
                 target_masks = self.convert_masks(target_masks)
+                
+                # Load inconsistent images from torch file if available
+                context_images_inconsistent = None
+                target_images_inconsistent = None
+                if self.cfg.load_inconsistent_images and "images_inconsistent" in example:
+                    context_images_inconsistent = [
+                        example["images_inconsistent"][index.item()] for index in context_indices
+                    ]
+                    context_images_inconsistent = self.convert_images(context_images_inconsistent)
+                    target_images_inconsistent = [
+                        example["images_inconsistent"][index.item()] for index in target_indices
+                    ]
+                    target_images_inconsistent = self.convert_images(target_images_inconsistent)
 
                 # Skip the example if the images don't have the right shape.
                 context_image_invalid = context_images.shape[1:] != (3, *self.cfg.original_image_shape)
@@ -318,6 +331,14 @@ class DatasetTHuman(IterableDataset):
                     "bgcolor": bgcolor,
                     "tpose_joints": tpose_joints[0],
                 }
+                
+                # Add inconsistent images if loaded from torch file
+                if context_images_inconsistent is not None:
+                    example["context"]["image_original"] = context_images.clone()
+                    example["context"]["image_inconsistent"] = context_images_inconsistent
+                if target_images_inconsistent is not None:
+                    example["target"]["image_original"] = target_images.clone()
+                    example["target"]["image_inconsistent"] = target_images_inconsistent
 
                 if self.cfg.load_template_uv:
                     example["context"].update({
@@ -356,14 +377,17 @@ class DatasetTHuman(IterableDataset):
                     # example["context"].update({
                     #     "lbs_weights": lbs_weights[context_indices]
                     # })
-                # Load inconsistent images if configured
-                if self.cfg.load_inconsistent_images and self.cfg.inconsistent_images_path is not None:
-                    example = apply_inconsistent_image_shim(
-                        example,
-                        inconsistent_base_path=self.cfg.inconsistent_images_path,
-                        stage=self.data_stage,
-                        frame_name_format=self.cfg.inconsistent_frame_name_format,
-                    )
+                
+                # Load inconsistent images from disk as fallback (only if not already loaded from torch file)
+                if self.cfg.load_inconsistent_images and context_images_inconsistent is None:
+                    # Fallback to disk loading if inconsistent images not embedded in torch file
+                    if self.cfg.inconsistent_images_path is not None:
+                        example = apply_inconsistent_image_shim(
+                            example,
+                            inconsistent_base_path=self.cfg.inconsistent_images_path,
+                            stage=self.data_stage,
+                            frame_name_format=self.cfg.inconsistent_frame_name_format,
+                        )
                 
                 # Apply harmonization: mix original and inconsistent images based on reference_mask
                 if self.cfg.use_harmonization:
