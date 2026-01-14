@@ -9,7 +9,7 @@ import numpy as np
 import os
 from torch.utils.data import Dataset
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from smplx import SMPLX
 from utils.easymocap2smplx import convert_easymocap_to_smplx
@@ -17,6 +17,18 @@ from src.misc.body_utils import get_canonical_tfms, get_canonical_global_tfms, b
 from dataloader import MVHumanNetDataset, custom_collate
 from .dataset import DatasetCfgCommon
 from .view_sampler import ViewSamplerCfg
+
+def expand_only_include(only_include):
+    if isinstance(only_include, str): # in the format ex: "100001-102000,102020-104000"
+        only_include = only_include.split(",")
+        expanded_includes = []
+        for subrange in only_include:
+            start, end = [int(num) for num in subrange.split("-")]
+            print(start, end)
+            expanded_includes.extend([str(i).zfill(6) for i in range(start, end + 1)])
+        return expanded_includes
+    else:
+        return only_include
 
 @dataclass
 class DatasetMVHNCfg(DatasetCfgCommon):
@@ -33,14 +45,14 @@ class DatasetMVHNCfg(DatasetCfgCommon):
     preload_path: str = "/workspace/datasetvol/mvhuman_data/preload_paths/shards"
     num_images: int = 3  # number of context views
     data_limit: Optional[int] = None
-    only_include: Optional[list] = None
+    only_include: Optional[list] = field(default_factory=lambda: expand_only_include("100001-104500"))
     exclude: Optional[list] = None
     step_size: int = 60
     random_crop: bool = False # currently, not used, but may be in the future for data augmentation.
     maximal_crop: bool = True # this should be true by default.
     white_background: bool = False
     crop_padding: int = 60 # padding for random crop aligned with IC-light images to mitigate cropping errors in bboxes.
-    use_inconsistent: bool = True # Use iclight/infu for non-reference frames. If False, no ic_rgb will be produced (or it will be a copy of 'frames').
+    use_inconsistent: bool = False # Use iclight/infu for non-reference frames. If False, no ic_rgb will be produced (or it will be a copy of 'frames').
     random_crop_prob: float = 0.0
     ic_sampling_prob: float = 1.0 # sample split probability of iclight vs infu
     iclight_dataset_path: Optional[str] = "/workspace/datasetvol/mvhuman_data/relit_images"
@@ -71,6 +83,9 @@ class DatasetMVHNCfg(DatasetCfgCommon):
     load_da_pose: bool = False  # Load DA-pose templates
     load_supervision: bool = False
     load_lbs_weights: bool = False
+
+    # debug
+    retry_limit: int = 20
 
 
 @dataclass
@@ -112,6 +127,17 @@ class DatasetMVHN(Dataset):
             self.cfg.sapiens_segmentation_channels_to_use = []
         if self.cfg.template_image_shape is None:
             self.cfg.template_image_shape = [1024, 1024]  # Default template resolution
+        
+        # Sync target_shape with input_image_shape if input_image_shape is set
+        # This ensures images are resized to the correct resolution
+        if self.cfg.input_image_shape is not None:
+            # Only override if target_shape is still at default or not explicitly set
+            # Convert list to tuple to match target_shape type
+            target_shape_tuple = tuple(self.cfg.input_image_shape)
+            if self.cfg.target_shape != target_shape_tuple:
+                # If target_shape differs from input_image_shape, sync them
+                # (User can override by explicitly setting target_shape in config)
+                self.cfg.target_shape = target_shape_tuple
         
         # Load SMPLX model for joints computation
         self.smplx_model = SMPLX(
@@ -205,7 +231,7 @@ class DatasetMVHN(Dataset):
     
     def __getitem__(self, idx):
         """Get a single example and transform it to THuman format."""
-        max_attempts = min(10, len(self))  # Try up to 10 indices or dataset length
+        max_attempts = min(self.cfg.retry_limit, len(self))  # Try up to 10 indices or dataset length
         
         for attempt in range(max_attempts):
             try:
@@ -340,7 +366,7 @@ class DatasetMVHN(Dataset):
             far_target = torch.full((num_views,), self.cfg.far, dtype=torch.float32)
             # cam_scale = mvhn_batch['cam_scale'].numpy()
             cam_center = mvhn_batch['cam_center'].numpy()
-            
+            cam_scale = mvhn_batch['cam_scale'].numpy()
             # ========================================================================
             # SMPLX parameters
             # ========================================================================
@@ -485,6 +511,7 @@ class DatasetMVHN(Dataset):
                 "ref_mask": ref_mask,
                 "smplx_params": smplx_params_torch,  # Original SMPLX parameters used to generate Rs/Ts
                 "cam_center": cam_center,
+                "cam_scale": cam_scale,
             }
             
             # Add static template information if loaded (same as THuman dataset)

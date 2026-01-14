@@ -298,8 +298,9 @@ class ModelWrapper(LightningModule):
         self.log("info/global_step", self.global_step)  # hack for ckpt monitor
 
         if "opacities" in visualization_dump and (self.global_rank == 0 and self.global_step % self.train_cfg.log_every_n_steps == 0):
-            context_img = batch["context"]["image"][0]
-            rgb_gt = batch["target"]["image"][0]
+            # Denormalize images for visualization (they're in [-1, 1] range from dataloader)
+            context_img = inverse_normalize(batch["context"]["image"][0], self.encoder.cfg.input_mean, self.encoder.cfg.input_std)
+            rgb_gt = inverse_normalize(batch["target"]["image"][0], self.encoder.cfg.input_mean, self.encoder.cfg.input_std)
             rgb_pred = output.color[0]
             if "output_img" in output_aux:
                 rgb_pred_img = output_aux["output_img"].color[0]

@@ -1618,7 +1618,8 @@ class MVHumanNetDataset(Dataset):
                 "subject_id": subject_id,
                 "timestep": timestep,
                 "smplx_params": smplx_params,
-                "cam_center": center # used for centering SMPLX
+                "cam_center": center, # used for centering SMPLX
+                "cam_scale": scale
             }
 
             if self.arcface_embeddings_dir is not None:
