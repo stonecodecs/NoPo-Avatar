@@ -46,7 +46,7 @@ class DatasetMVHNCfg(DatasetCfgCommon):
     num_images: int = 3  # number of context views
     data_limit: Optional[int] = None
     only_include: Optional[list] = field(default_factory=lambda: expand_only_include("100001-104500"))
-    exclude: Optional[list] = None
+    exclude: Optional[list] = field(default_factory=lambda: expand_only_include("100602-100995"))
     step_size: int = 60
     random_crop: bool = False # currently, not used, but may be in the future for data augmentation.
     maximal_crop: bool = True # this should be true by default.
