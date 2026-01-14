@@ -294,7 +294,7 @@ class DatasetMVHN(Dataset):
                 elif not isinstance(context_images, torch.Tensor):
                     # Fallback to frames if ic_rgb is not available or wrong type
                     context_images = mvhn_batch['frames']
-            else:
+            else: # otherwise, already consistent set => use frames again
                 context_images = mvhn_batch['frames']  # [N, 3, H, W]
             
             # Ensure context_images is a tensor

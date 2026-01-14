@@ -1247,7 +1247,7 @@ class MVHumanNetDataset(Dataset):
                     ic_image_ = self.transform(ic_image_)
                     ic_rgb_tensor[i] = ic_image_
 
-                    if self.use_sapiens_conditioning is not None:
+                    if self.use_sapiens_conditioning is not None and len(self.use_sapiens_conditioning) > 0:
                         ref_idx = torch.where(ref_mask == True)[0][0].item()
                         for cond in self.use_sapiens_conditioning:
                             cond_tensor = sapiens_conditionings[cond][i]
@@ -1273,7 +1273,8 @@ class MVHumanNetDataset(Dataset):
                             if cond == "seg_masks":
                                 sapiens_conditionings[cond][i] = one_hot_encode_segmentation(sapiens_conditionings[cond][i], 28)
 
-                sapiens_conditionings = {cond: torch.stack(cond_tensor, dim=0) for cond, cond_tensor in sapiens_conditionings.items()}
+                if self.use_sapiens_conditioning is not None and len(self.use_sapiens_conditioning) > 0:
+                    sapiens_conditionings = {cond: torch.stack(cond_tensor, dim=0) for cond, cond_tensor in sapiens_conditionings.items()}
                 ic_rgb = ic_rgb_tensor
             else: # if not, ic_rgb is the same as frames
                 ic_rgb = frames
@@ -1313,7 +1314,10 @@ class MVHumanNetDataset(Dataset):
                         cond_tensor = T.Resize((self.target_shape[0], self.target_shape[1]))(cond_tensor)
                         if cond == "seg_masks":
                             cond_tensor = one_hot_encode_segmentation(cond_tensor, 28)
-            sapiens_conditionings = {cond: torch.stack(cond_tensor, dim=0) for cond, cond_tensor in sapiens_conditionings.items()}
+                sapiens_conditionings = {cond: torch.stack(cond_tensor, dim=0) for cond, cond_tensor in sapiens_conditionings.items()}
+            else:
+                # Ensure sapiens_conditionings is an empty dict if not using it
+                sapiens_conditionings = {}
         return frames, image_masks, ic_rgb, Ks, sapiens_conditionings, face_bboxes_adjusted
 
 
@@ -1502,13 +1506,22 @@ class MVHumanNetDataset(Dataset):
             subject_id, timestep, ref_mask, ic_masks
         )
 
-        arcface_embeddings = self._get_arcface_embeddings(
-            subject_id, timestep, cam_order, input_target_mask, ref_mask, ic_masks
-        )
+        # for now, we don't use any arcface embeddings or sapiens conditioning
+        # Initialize arcface_embeddings if needed
+        if self.arcface_embeddings_dir is not None:
+            arcface_embeddings = self._get_arcface_embeddings(
+                subject_id, timestep, cam_order, input_target_mask, ref_mask, ic_masks
+            )
+        else:
+            arcface_embeddings = None
 
-        sapiens_conditionings = self._get_sapiens_conditionings(
-            subject_id, timestep, cam_order, ic_paths, input_target_mask, ref_mask, ic_masks
-        )
+        # Initialize sapiens_conditionings to empty dict if not using it
+        if self.use_sapiens_conditioning is not None:
+            sapiens_conditionings = self._get_sapiens_conditionings(
+                subject_id, timestep, cam_order, ic_paths, input_target_mask, ref_mask, ic_masks
+            )
+        else:
+            sapiens_conditionings = {}
 
         frames, img_masks, ic_rgb, Ks, sapiens_conditionings, face_bboxes_adjusted = self._crop_and_transform_frames_and_intrinsics(
             frames_info, frames, image_masks, ic_rgb,
@@ -1535,7 +1548,7 @@ class MVHumanNetDataset(Dataset):
         all_c2ws = torch.from_numpy(all_c2ws).float()
         c2ws = all_c2ws[sample_permutation]
         center = center_cameras(all_c2ws, c2ws)
-        # scale = scale_cameras(c2ws)
+        scale = scale_cameras(c2ws)
 
         w2cs = torch.linalg.inv(c2ws)
         src_camera_idx = input_target_mask.to(torch.int).argmax().item()
@@ -1581,18 +1594,20 @@ class MVHumanNetDataset(Dataset):
         if 'transl' in smplx_params:
             transl = torch.from_numpy(smplx_params['transl']).float()
             # center is shape [1, 3], transl is [3] or [1, 3]
-            transl = (transl - center.squeeze(0))
+            transl = (transl - center.squeeze(0)) # center the scene to the mean of cameras
+            transl = transl * scale # scale the scene to the mean of cameras
+            # potentially try bringing back scaling as well
             smplx_params['transl'] = transl.numpy()
 
         try:
             output_dict = {
-                "clean_latent": clean_latents,
+                # "clean_latent": clean_latents,
                 "mask": input_target_mask,
                 "ref_mask": ref_mask,
                 "ic_rgb": ic_rgb,
-                "plucker": pluckers,
-                "camera_mask": camera_mask,
-                "concat": concat,
+                # "plucker": pluckers,
+                # "camera_mask": camera_mask,
+                # "concat": concat,
                 "frames": frames,
                 "frames_masks": img_masks,
                 "replace": replace,
@@ -1603,7 +1618,7 @@ class MVHumanNetDataset(Dataset):
                 "subject_id": subject_id,
                 "timestep": timestep,
                 "smplx_params": smplx_params,
-                "cam_center": center
+                "cam_center": center # used for centering SMPLX
             }
 
             if self.arcface_embeddings_dir is not None:
