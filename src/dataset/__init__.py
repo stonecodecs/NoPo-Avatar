@@ -5,17 +5,19 @@ from torch.utils.data import Dataset
 from ..misc.step_tracker import StepTracker
 from .dataset_thuman import DatasetTHuman, DatasetTHumanCfgWrapper, DatasetTHumanCfg
 from .dataset_huge100k import DatasetHuge100K, DatasetHuge100KCfgWrapper, DatasetHuge100KCfg
+from .dataset_mvhn import DatasetMVHN, DatasetMVHNCfgWrapper, DatasetMVHNCfg
 from .types import Stage
 from .view_sampler import get_view_sampler
 
 DATASETS: dict[str, Dataset] = {
     "thuman": DatasetTHuman,
     "huge100k": DatasetHuge100K,
+    "mvhn": DatasetMVHN,
 }
 
 
-DatasetCfgWrapper = DatasetTHumanCfgWrapper | DatasetHuge100KCfgWrapper
-DatasetCfg = DatasetTHumanCfg | DatasetHuge100KCfg
+DatasetCfgWrapper = DatasetTHumanCfgWrapper | DatasetHuge100KCfgWrapper | DatasetMVHNCfgWrapper
+DatasetCfg = DatasetTHumanCfg | DatasetHuge100KCfg | DatasetMVHNCfg
 
 
 def get_dataset(

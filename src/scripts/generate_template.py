@@ -102,7 +102,7 @@ else:
     smpl_model = SMPL(model_path='datasets/smplx', gender='neutral')
     lbs_weights = smpl_model.lbs_weights.to(dtype=torch.float32, device='cuda')
 
-for resolution in [256, 512, 1024]:
+for resolution in [256, 512, 576, 1024]:
     glctx = dr.RasterizeCudaContext()
 
     if use_smplx:
