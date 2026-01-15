@@ -169,7 +169,7 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
             img2.jpg (or .png)
         (intrinsics.npy)
         (extrinsics.npy)
-        (smplx_params.npz)
+        (smplx_params.json)
         (test/)
     """
     img_dir = Path(input_dir) / 'images'
@@ -179,7 +179,7 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
 
     intrinsics_path = Path(input_dir) / 'intrinsics.npy'
     extrinsics_path = Path(input_dir) / 'extrinsics.npy'
-    smplx_params_path = Path(input_dir) / 'smplx_params.npz'
+    smplx_params_path = Path(input_dir) / 'smplx_params.json'
     test_dir = Path(input_dir) / 'test'
 
     intrinsics_path = intrinsics_path if intrinsics_path.exists() else None
@@ -230,8 +230,9 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
 
     # load smplx params if available
     if smplx_params_path is not None:
-        smplx_params = np.load(smplx_params_path)
-        print(f"Loaded smplx params from {smplx_params_path}")
+        import json
+        smplx_params = json.load(open(smplx_params_path))
+        print(f"Loaded smplx params from {smplx_params_path}: {smplx_params}")
     else:
         smplx_params = None
 
@@ -289,9 +290,11 @@ def run_inference(
         'far': torch.ones(1, num_v, device=device) * 100.0,
         'overlap': torch.ones(1, num_v, num_v, device=device),
         'use_smplx': torch.ones(1, num_v, dtype=torch.bool, device=device),
-        'cnl_Rs': torch.tensor(smplx_params['cnl_Rs']).to(device) if smplx_params is not None else None,
-        'cnl_Ts': torch.tensor(smplx_params['cnl_Ts']).to(device) if smplx_params is not None else None,
     }
+
+    # if SMPLX parameters are provided, update context:
+    if smplx_params is not None:
+        context.update(smplx_params)
     
     # Add template data
     if is_template:

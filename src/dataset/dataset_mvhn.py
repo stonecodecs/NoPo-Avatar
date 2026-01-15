@@ -281,7 +281,7 @@ class DatasetMVHN(Dataset):
         
         try:
             # Validate and convert frames to tensor
-            if 'frames' not in mvhn_batch: # TODO: frames are 576x576 in MVHN, interpolate to 1024x1024 in orig. dataloader
+            if 'frames' not in mvhn_batch:
                 raise ValueError("Missing 'frames' key in batch")
             
             frames = mvhn_batch['frames'] # [N,3,H,W]
@@ -305,7 +305,7 @@ class DatasetMVHN(Dataset):
             # these are scaled + centered already by MVHN dataloader (see dataloader.py)
             extrinsics = mvhn_batch['c2w']  # [N, 4, 4]
             intrinsics = mvhn_batch['K']  # [N, 3, 3]
-            # TODO compare with thuman camera parameters
+            # TODO compare with thuman camera parameters (scale and center as expected by the model)
             
             # Get reference mask and input mask
             ref_mask = mvhn_batch['ref_mask']  # [N] bool

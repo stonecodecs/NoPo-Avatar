@@ -5,6 +5,7 @@ import os
 import pickle
 from pathlib import Path
 from typing import Literal, TypedDict, Optional
+import argparse
 
 import numpy as np
 import torch
@@ -24,14 +25,14 @@ import nvdiffrast.torch
 from ..misc.body_utils import get_canonical_global_tfms, get_global_RTs, body_pose_to_body_RTs, apply_global_tfm_to_camera, apply_lbs_to_means
 
 DEBUG = False
-THuman21 = False
+THuman21 = True
 RASTERIZE_LBS_WEIGHTS = True
 
 INPUT_DIR = Path("datasets/thuman")
 if THuman21:
-    OUTPUT_DIR = Path("datasets/thuman2.1")
+    OUTPUT_DIR = Path("/workspace/humanvol/thuman2.1")
 else:
-    OUTPUT_DIR = Path("datasets/thuman2.0")
+    OUTPUT_DIR = Path("/workspace/humanvol/thuman2.0")
 
 TRAIN_FRAME_ORDERS = []
 for i in range(16):
@@ -46,14 +47,112 @@ TEST_FRAME_ORDERS = [0, 1, 2, 3, 4, 5]
 TARGET_BYTES_PER_CHUNK = int(5e7)
 
 
-def get_example_keys(stage: Literal["test", "train"]) -> list[str]:
-    if THuman21 and stage == "train":
+def get_example_keys(stage: Literal["test", "train"], custom_json_path: Optional[str] = None, limit: Optional[int] = None) -> list[str]:
+    """
+    Get example keys for a given stage.
+    
+    Args:
+        stage: "test" or "train"
+        custom_json_path: Optional path to a custom JSON file with keys
+        limit: Optional limit on number of entries to return
+    """
+    if custom_json_path:
+        with open(custom_json_path) as f:
+            keys = json.load(f)
+    elif THuman21 and stage == "train":
         with open(f'datasets/thuman/thuman2.1_train.json') as f:
             keys = json.load(f)
-        return keys
-    with open(f'datasets/thuman/thuman2.0_{stage}.json') as f:
-        keys = json.load(f)
+    else:
+        with open(f'datasets/thuman/thuman2.0_{stage}.json') as f:
+            keys = json.load(f)
+    
+    if limit is not None:
+        keys = keys[:limit]
+    
     return keys
+
+
+def get_already_processed_keys(stage: str, output_dir: Path) -> set[str]:
+    """
+    Get set of keys that have already been processed by checking existing chunks.
+    
+    Args:
+        stage: "train", "val", or "test"
+        output_dir: Output directory path
+        
+    Returns:
+        Set of already-processed keys
+    """
+    already_processed = set()
+    stage_path = output_dir / stage
+    
+    if not stage_path.exists():
+        return already_processed
+    
+    # First, try to load from index.json if it exists (faster)
+    index_path = stage_path / "index.json"
+    if index_path.exists():
+        try:
+            with open(index_path, 'r') as f:
+                index = json.load(f)
+                already_processed.update(index.keys())
+                print(f"Found {len(already_processed)} already-processed keys from index.json")
+                return already_processed
+        except Exception as e:
+            print(f"Warning: Could not load index.json: {e}. Scanning chunks instead...")
+    
+    # Otherwise, scan all chunk files
+    chunk_files = list(stage_path.glob("*.torch"))
+    if not chunk_files:
+        return already_processed
+    
+    print(f"Scanning {len(chunk_files)} existing chunk files to find already-processed keys...")
+    for chunk_path in tqdm(chunk_files, desc="Loading chunks"):
+        try:
+            chunk = torch.load(chunk_path)
+            for example in chunk:
+                if "key" in example:
+                    already_processed.add(example["key"])
+        except Exception as e:
+            print(f"Warning: Could not load chunk {chunk_path}: {e}. Skipping...")
+            continue
+    
+    print(f"Found {len(already_processed)} already-processed keys from chunks")
+    return already_processed
+
+
+def get_next_chunk_index(stage: str, output_dir: Path) -> int:
+    """
+    Get the next chunk index by finding the highest existing chunk number.
+    
+    Args:
+        stage: "train", "val", or "test"
+        output_dir: Output directory path
+        
+    Returns:
+        Next chunk index to use
+    """
+    stage_path = output_dir / stage
+    if not stage_path.exists():
+        return 0
+    
+    chunk_files = list(stage_path.glob("*.torch"))
+    if not chunk_files:
+        return 0
+    
+    # Extract chunk indices from filenames (format: "000000.torch")
+    chunk_indices = []
+    for chunk_path in chunk_files:
+        try:
+            chunk_idx = int(chunk_path.stem)
+            chunk_indices.append(chunk_idx)
+        except ValueError:
+            continue
+    
+    if not chunk_indices:
+        return 0
+    
+    return max(chunk_indices) + 1
 
 
 def get_size(path: Path) -> int:
@@ -300,6 +399,32 @@ def vis_example(example, canonical_path):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ic", action="store_true")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Output directory (default: None)")
+    parser.add_argument("--custom-json", type=str, default=None, 
+                        help="Path to custom JSON file with keys (e.g., datasets/thuman/thuman2.1_train_subset_100.json)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Limit number of entries to process (e.g., 100)")
+    parser.add_argument("--force", action="store_true",
+                        help="Force re-processing of all entries, even if already processed")
+    args = parser.parse_args()
+    pack_inconsistent = args.ic
+    if args.output_dir:
+        print(f"Using output directory: {args.output_dir}")
+        OUTPUT_DIR = Path(args.output_dir)
+    else:
+        print(f"Using default output directory: {OUTPUT_DIR}")
+
+    print(f"pack_inconsistent: {pack_inconsistent}")
+    if args.custom_json:
+        print(f"Using custom JSON file: {args.custom_json}")
+    if args.limit:
+        print(f"Limiting to first {args.limit} entries")
+    if args.force:
+        print("Force mode: Will re-process all entries (ignoring existing chunks)")
+
     for stage in ("train", "val", "test"):
         if stage == "train":
             path = INPUT_DIR / "train"
@@ -307,10 +432,31 @@ if __name__ == "__main__":
             path = INPUT_DIR / "val"
         elif stage == "test":
             path = INPUT_DIR / "val"
-        keys = get_example_keys("train" if stage == "train" else "val")
+        keys = get_example_keys("train" if stage == "train" else "val", 
+                                custom_json_path=args.custom_json,
+                                limit=args.limit)
+
+        # Resume functionality: skip already-processed keys (unless --force is used)
+        if args.force:
+            already_processed = set()
+            chunk_index = 0
+            print(f"Force mode: Processing all {len(keys)} entries from scratch.")
+        else:
+            already_processed = get_already_processed_keys(stage, OUTPUT_DIR)
+            if already_processed:
+                original_count = len(keys)
+                keys = [k for k in keys if k not in already_processed]
+                skipped_count = original_count - len(keys)
+                print(f"Resuming: Skipping {skipped_count} already-processed entries. {len(keys)} remaining to process.")
+            else:
+                print(f"Starting fresh: Processing {len(keys)} entries.")
+
+            # Get next chunk index (for resume)
+            chunk_index = get_next_chunk_index(stage, OUTPUT_DIR)
+            if chunk_index > 0:
+                print(f"Resuming: Starting from chunk index {chunk_index}")
 
         chunk_size = 0
-        chunk_index = 0
         chunk: list[Example] = []
 
         def save_chunk():
@@ -330,41 +476,55 @@ if __name__ == "__main__":
             chunk_size = 0
             chunk_index += 1
             chunk = []
-
+        
         for key in keys:
-            image_dir = path / key / "images"
-            mask_dir = path / key / "masks"
-            canonical_metafile = path / key / "canonical_joints.pkl"
-            camera_metafile = path / key / "cameras.pkl"
-            pose_metafile = path / key / "mesh_infos.pkl"
-
-            # Read images and metadata.
-            images = load_images(image_dir)
-            masks = load_images(mask_dir)
-            example = load_metadata(camera_metafile, canonical_metafile, pose_metafile, key, stage)
-
-            num_bytes = get_size(path / key)
-            # Merge the images into the example.
-            # from int to "frame_00001" format
-            image_names = [f"frame_{timestamp.item():0>6}" for timestamp in example["timestamps"]]
             try:
-                example["images"] = [
-                    images[image_name] for image_name in image_names
-                ]
-                example["masks"] = [
-                    masks[image_name] for image_name in image_names
-                ]
-            except KeyError:
-                print(f"Skipping {key} because of missing images.")
+                image_dir = path / key / "images"
+                mask_dir = path / key / "masks"
+                canonical_metafile = path / key / "canonical_joints.pkl"
+                camera_metafile = path / key / "cameras.pkl"
+                pose_metafile = path / key / "mesh_infos.pkl"
+                if pack_inconsistent:
+                    # for now, we assume the mask is aligned with the ic images
+                    # ! HARDCODED: ic images are in a different directory -- sufficient for our needs for now
+                    ic_dir = Path("/workspace/humanvol/thuman_iclight") / stage / key / "images"
+
+                # Read images and metadata.
+                images = load_images(image_dir)
+                if pack_inconsistent: # follows the same format as the images with a different root path
+                    ic_images = load_images(ic_dir)
+                masks = load_images(mask_dir)
+                example = load_metadata(camera_metafile, canonical_metafile, pose_metafile, key, stage)
+
+                num_bytes = get_size(path / key)
+                # Merge the images into the example.
+                # from int to "frame_00001" format
+                image_names = [f"frame_{timestamp.item():0>6}" for timestamp in example["timestamps"]]
+                try:
+                    example["images"] = [
+                        images[image_name] for image_name in image_names
+                    ]
+                    example["masks"] = [
+                        masks[image_name] for image_name in image_names
+                    ]
+                    if pack_inconsistent:
+                        example["ic_images"] = [
+                            ic_images[image_name] for image_name in image_names
+                        ]
+                except KeyError:
+                    print(f"Skipping {key} because of missing images.")
+                    continue
+                assert len(example["images"]) == len(example["timestamps"]), f"len(example['images'])={len(example['images'])}, len(example['timestamps'])={len(example['timestamps'])}"
+        
+                # Add the key to the example.
+                example["key"] = key
+
+                print(f"    Added {key} to chunk ({num_bytes / 1e6:.2f} MB).", flush=True)
+                chunk.append(example)
+                chunk_size += num_bytes
+            except Exception as e:
+                print(f"Error adding {key} to chunk: {e}. Skipping...")
                 continue
-            assert len(example["images"]) == len(example["timestamps"]), f"len(example['images'])={len(example['images'])}, len(example['timestamps'])={len(example['timestamps'])}"
-
-            # Add the key to the example.
-            example["key"] = key
-
-            print(f"    Added {key} to chunk ({num_bytes / 1e6:.2f} MB).", flush=True)
-            chunk.append(example)
-            chunk_size += num_bytes
 
             if chunk_size >= TARGET_BYTES_PER_CHUNK:
                 save_chunk()
@@ -375,14 +535,34 @@ if __name__ == "__main__":
         if chunk_size > 0:
             save_chunk()
 
-        # generate index
+        # generate index (merge with existing if resuming)
         print("Generate key:torch index...")
-        index = {}
         stage_path = OUTPUT_DIR / stage
+        index_path = stage_path / "index.json"
+        
+        # Load existing index if it exists
+        index = {}
+        if index_path.exists() and not args.force:
+            try:
+                with open(index_path, 'r') as f:
+                    index = json.load(f)
+                print(f"Loaded {len(index)} existing entries from index.json")
+            except Exception as e:
+                print(f"Warning: Could not load existing index: {e}. Rebuilding from scratch...")
+        
+        # Update index with all chunks
         for chunk_path in tqdm(list(stage_path.iterdir()), desc=f"Indexing {stage_path.name}"):
             if chunk_path.suffix == ".torch":
-                chunk = torch.load(chunk_path)
-                for example in chunk:
-                    index[example["key"]] = str(chunk_path.relative_to(stage_path))
-        with (stage_path / "index.json").open("w") as f:
-            json.dump(index, f)
+                try:
+                    chunk = torch.load(chunk_path)
+                    for example in chunk:
+                        if "key" in example:
+                            index[example["key"]] = str(chunk_path.relative_to(stage_path))
+                except Exception as e:
+                    print(f"Warning: Could not load chunk {chunk_path} for indexing: {e}")
+                    continue
+        
+        # Save updated index
+        with index_path.open("w") as f:
+            json.dump(index, f, indent=2)
+        print(f"Index updated: {len(index)} total entries")
