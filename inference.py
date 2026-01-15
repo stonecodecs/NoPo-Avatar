@@ -179,12 +179,17 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
 
     intrinsics_path = Path(input_dir) / 'intrinsics.npy'
     extrinsics_path = Path(input_dir) / 'extrinsics.npy'
-    smplx_params_path = Path(input_dir) / 'smplx_params.json'
+    # Support both .json and .npy formats for SMPLX params
+    smplx_params_path = None
+    for ext in ['.npy', '.json']:
+        candidate = Path(input_dir) / f'smplx_params{ext}'
+        if candidate.exists():
+            smplx_params_path = candidate
+            break
     test_dir = Path(input_dir) / 'test'
 
     intrinsics_path = intrinsics_path if intrinsics_path.exists() else None
     extrinsics_path = extrinsics_path if extrinsics_path.exists() else None
-    smplx_params_path = smplx_params_path if smplx_params_path.exists() else None
     test_dir = test_dir if test_dir.exists() and test_dir.is_dir() else None
 
     # these are required!
@@ -230,9 +235,75 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
 
     # load smplx params if available
     if smplx_params_path is not None:
-        import json
-        smplx_params = json.load(open(smplx_params_path))
-        print(f"Loaded smplx params from {smplx_params_path}: {smplx_params}")
+        smplx_params_path = Path(smplx_params_path)
+        if smplx_params_path.suffix == ".npy":
+            # Load from .npy file (saved as dictionary with numpy arrays)
+            loaded_data = np.load(smplx_params_path, allow_pickle=True)
+            if isinstance(loaded_data, np.lib.npyio.NpzFile):
+                # .npz file (multiple arrays)
+                smplx_params = {k: loaded_data[k] for k in loaded_data.files}
+            else:
+                # Single .npy file (dictionary saved with allow_pickle=True)
+                smplx_params = loaded_data.item() if isinstance(loaded_data, np.ndarray) else loaded_data
+            # Convert numpy arrays to torch tensors and ensure proper batch dimensions
+            smplx_params_processed = {}
+            for key, value in smplx_params.items():
+                if isinstance(value, np.ndarray):
+                    tensor = torch.from_numpy(value).float().to(device)
+                    # Add batch dimension if needed based on expected shapes
+                    # Note: batch['context']['Rs'] already has shape [1, num_v, 55, 3, 3]
+                    # So we check if batch dimension is missing (ndim == 4 for Rs, ndim == 3 for Ts)
+                    if key in ['Rs', 'Rs_tpose', 'cnl_Rs']:
+                        # Expected: [1, num_v, 55, 3, 3] or [num_v, 55, 3, 3]
+                        if tensor.ndim == 4:
+                            # Missing batch dimension: [num_v, 55, 3, 3] -> [1, num_v, 55, 3, 3]
+                            tensor = tensor.unsqueeze(0)
+                        elif tensor.ndim == 5 and tensor.shape[0] != 1:
+                            # Has batch dimension but wrong size, take first or repeat
+                            if tensor.shape[0] > 1:
+                                tensor = tensor[0:1]  # Take first batch
+                    elif key in ['Ts', 'Ts_tpose', 'cnl_Ts']:
+                        # Expected: [1, num_v, 55, 3] or [num_v, 55, 3]
+                        if tensor.ndim == 3:
+                            # Missing batch dimension: [num_v, 55, 3] -> [1, num_v, 55, 3]
+                            tensor = tensor.unsqueeze(0)
+                        elif tensor.ndim == 4 and tensor.shape[0] != 1:
+                            # Has batch dimension but wrong size, take first or repeat
+                            if tensor.shape[0] > 1:
+                                tensor = tensor[0:1]  # Take first batch
+                    smplx_params_processed[key] = tensor
+                else:
+                    smplx_params_processed[key] = value
+            smplx_params = smplx_params_processed
+            print(f"Loaded smplx params from {smplx_params_path} (.npy format)")
+        elif smplx_params_path.suffix == ".json":
+            import json
+            smplx_params = json.load(open(smplx_params_path))
+            # Convert JSON lists to torch tensors if needed
+            smplx_params_processed = {}
+            for key, value in smplx_params.items():
+                if isinstance(value, list):
+                    tensor = torch.tensor(value).float().to(device)
+                    # Add batch dimension if needed (same logic as .npy loading)
+                    if key in ['Rs', 'Rs_tpose', 'cnl_Rs']:
+                        if tensor.ndim == 4:
+                            tensor = tensor.unsqueeze(0)
+                        elif tensor.ndim == 5 and tensor.shape[0] != 1:
+                            if tensor.shape[0] > 1:
+                                tensor = tensor[0:1]
+                    elif key in ['Ts', 'Ts_tpose', 'cnl_Ts']:
+                        if tensor.ndim == 3:
+                            tensor = tensor.unsqueeze(0)
+                        elif tensor.ndim == 4 and tensor.shape[0] != 1:
+                            if tensor.shape[0] > 1:
+                                tensor = tensor[0:1]
+                    smplx_params_processed[key] = tensor
+                else:
+                    smplx_params_processed[key] = value
+            smplx_params = smplx_params_processed
+            print(f"Loaded smplx params from {smplx_params_path} (.json format)")
+        else:
+            raise ValueError(f"Unsupported SMPLX params file format: {smplx_params_path.suffix}")
     else:
         smplx_params = None
 
@@ -285,6 +356,7 @@ def run_inference(
         'image': torch.from_numpy(np.stack(images)).unsqueeze(0).to(device).permute(0, 1, 4, 2, 3),
         'mask': torch.from_numpy(np.stack(masks)).unsqueeze(0).to(device),
         'intrinsics': intrinsics,
+        'extrinsics': extrinsics,
         'index': torch.arange(num_v, device=device)[None],
         'near': torch.ones(1, num_v, device=device) * 0.1,
         'far': torch.ones(1, num_v, device=device) * 100.0,
@@ -293,6 +365,7 @@ def run_inference(
     }
 
     # if SMPLX parameters are provided, update context:
+    # NOTE: we assume that these smplx_parameters are the same ones to be used for target rendering
     if smplx_params is not None:
         context.update(smplx_params)
     
@@ -314,22 +387,22 @@ def run_inference(
     # ! this saves gaussians in canonical average body T-pose
     means = gaussians.means[0].cpu().numpy()
     valid = np.linalg.norm(means, axis=-1) < 1e7
-    np.savez(output_path / 'cnl_gaussians.npz', 
+    np.savez(output_path / 'tpose_gaussians.npz', 
              means=means[valid], 
              covariances=gaussians.covariances[0].cpu().numpy()[valid],
              harmonics=gaussians.harmonics[0].cpu().numpy()[valid],
              opacities=gaussians.opacities[0].cpu().numpy()[valid])
              
-    print(f"✓ Success! Output saved to {output_dir}/cnl_gaussians.npz")
+    print(f"✓ Success! Output saved to {output_dir}/tpose_gaussians.npz")
 
     # * PLY export that uses smplx 'betas' to warp the template body to subject identity
-    curr_cnl_Rs = context['cnl_Rs'][:, 0].clone().detach().to(device)
-    curr_cnl_Ts = context['cnl_Ts'][:, 0].clone().detach().to(device)
+    # curr_cnl_Rs = context['cnl_Rs'][:, 0].clone().detach().to(device)
+    # curr_cnl_Ts = context['cnl_Ts'][:, 0].clone().detach().to(device)
     shaped_means, shaped_covs = apply_lbs_to_gaussians(
         gaussians.means,
         gaussians.covariances,
-        curr_cnl_Rs,
-        curr_cnl_Ts,
+        context['cnl_Rs'][:,0].clone().detach().to(device),
+        context['cnl_Ts'][:,0].clone().detach().to(device),
         F.softmax(gaussians.lbs_weights_bones, dim=-1) # Shape-specific weights
     )
 
@@ -345,13 +418,28 @@ def run_inference(
 
     # render test views if provided
     if render and test_dir:
-        test_images, test_masks, test_intrinsics, test_extrinsics, _, _ = load_data_dir(test_dir, image_size, device)
+        # this overwrites smplx params with the test views (but these are essentially the same.)
+        test_images, test_masks, test_intrinsics, test_extrinsics, smplx_params, _ = load_data_dir(test_dir, image_size, device)
         assert test_intrinsics is not None
         assert test_extrinsics is not None
 
+        target = {
+            'image': torch.from_numpy(np.stack(test_images)).unsqueeze(0).to(device).permute(0, 1, 4, 2, 3),
+            'mask': torch.from_numpy(np.stack(test_masks)).unsqueeze(0).to(device),
+            'intrinsics': test_intrinsics,
+            'extrinsics': test_extrinsics,
+            'index': torch.arange(num_v, device=device)[None],
+            'near': torch.ones(1, num_v, device=device) * 0.1,
+            'far': torch.ones(1, num_v, device=device) * 100.0,
+            'overlap': torch.ones(1, num_v, num_v, device=device),
+            'use_smplx': torch.ones(1, num_v, dtype=torch.bool, device=device),
+        }
+        if smplx_params is not None:
+            target.update(smplx_params)
+
         render_novel_views(
-            test_intrinsics,
-            test_extrinsics,
+            target,
+            smplx_params,
             output_dir,
             full_cfg,
             gaussians,
@@ -359,7 +447,7 @@ def run_inference(
         ) # saves in output_dir with same name
 
 
-def render_novel_views(test_intrinsics, test_extrinsics, output_dir, full_cfg, gaussians, device):
+def render_novel_views(target_context, smplx_params, output_dir, full_cfg, gaussians, device):
     """Render novel views using pre-computed Gaussians and provided camera parameters."""
     import src.model.decoder as decoder_module
 
@@ -370,11 +458,13 @@ def render_novel_views(test_intrinsics, test_extrinsics, output_dir, full_cfg, g
 
     # Use provided extrinsics (assumed to be in C2W format already)
     # If extrinsics are None, we can't render novel views
-    if test_extrinsics is None:
+    if target_context.get('extrinsics', None) is None:
         raise ValueError("Extrinsics are required for novel view rendering")
-    
-    target_c2w = test_extrinsics
-    target_intrinsics = test_intrinsics
+    if smplx_params is None:
+        raise ValueError("SMPLX parameters are required for novel view rendering")
+
+    target_c2w = target_context['extrinsics'].to(device)
+    target_intrinsics = target_context['intrinsics'].to(device)
 
     # For arbitrary poses without pose estimation, we use identity transforms
     # This renders the person "as-is" in the novel camera viewpoint
@@ -385,10 +475,15 @@ def render_novel_views(test_intrinsics, test_extrinsics, output_dir, full_cfg, g
         target_intrinsics = target_intrinsics[None]
     
     # Identity Human Pose (Static - no pose warping) # TODO: use pose estimation
-    Rs = torch.eye(3, device=device)[None, None, None].repeat(1, num_v, 55, 1, 1)
-    Ts = torch.zeros(1, num_v, 55, 3, device=device)
-    cnl_Rs = torch.eye(3, device=device)[None, None, None].repeat(1, num_v, 55, 1, 1)
-    cnl_Ts = torch.zeros(1, num_v, 55, 3, device=device)
+    # Rs = torch.eye(3, device=device)[None, None, None].repeat(1, num_v, 55, 1, 1)
+    # Ts = torch.zeros(1, num_v, 55, 3, device=device)
+    # cnl_Rs = torch.eye(3, device=device)[None, None, None].repeat(1, num_v, 69, 1, 1)
+    # cnl_Ts = torch.zeros(1, num_v, 69, 3, device=device)
+
+    Rs = smplx_params['Rs'].to(device)
+    Ts = smplx_params['Ts'].to(device)
+    cnl_Rs = smplx_params['cnl_Rs'].to(device) # (V,69,3,3)
+    cnl_Ts = smplx_params['cnl_Ts'].to(device) # (V,69,3)
 
     # Render
     with torch.no_grad():
@@ -431,7 +526,7 @@ def update_cfg_with_defaults(encoder_cfg, state_dict: dict, image_size: tuple = 
     embed_loc = 'none'
     encoder_cfg.intrinsics_embed_loc = embed_loc
     encoder_cfg.backbone.intrinsics_embed_loc = embed_loc
-    encoder_cfg.backbone.intrinsics_embed_type = 'token'
+    encoder_cfg.backbone.intrinsics_embed_type = 'none'
     encoder_cfg.backbone.template_image_size = [image_size[0], image_size[1]]
     encoder_cfg.debug = False
     encoder_cfg.input_mean = [0.5,0.5,0.5]
