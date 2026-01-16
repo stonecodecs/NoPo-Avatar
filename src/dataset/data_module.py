@@ -16,6 +16,7 @@ from ..misc.step_tracker import StepTracker
 from . import DatasetCfgWrapper, get_dataset
 from .types import DataShim, Stage
 from .validation_wrapper import ValidationWrapper
+from .error_handling_wrapper import ErrorHandlingDatasetWrapper
 
 
 def get_data_shim(encoder: nn.Module) -> DataShim:
@@ -117,6 +118,9 @@ class DataModule(LightningDataModule):
         data_loaders = []
         for dataset in datasets:
             dataset = self.dataset_shim(dataset, "train")
+            # Wrap dataset to handle errors gracefully
+            if isinstance(dataset, IterableDataset):
+                dataset = ErrorHandlingDatasetWrapper(dataset)
             data_loaders.append(
                 DataLoader(
                     dataset,
