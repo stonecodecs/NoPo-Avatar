@@ -237,6 +237,10 @@ class DatasetTHuman(IterableDataset):
                 target_masks = self.convert_masks(target_masks)
                 
                 # Load inconsistent images from torch file if available
+                # Rename 'ic_images' to 'images_inconsistent' if present (for compatibility)
+                if self.cfg.load_inconsistent_images and "ic_images" in example:
+                    example["images_inconsistent"] = example.pop("ic_images")
+                
                 context_images_inconsistent = None
                 target_images_inconsistent = None
                 if self.cfg.load_inconsistent_images and "images_inconsistent" in example:

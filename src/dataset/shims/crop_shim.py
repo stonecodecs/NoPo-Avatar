@@ -187,6 +187,41 @@ def rescale_and_crop(
         return center_crop(images, masks, lbs_weights, intrinsics, shape)
 
 
+def rescale_images_only(
+    images: Float[Tensor, "*#batch c h w"],
+    shape: tuple[int, int],
+    pad: bool = False,
+    bgcolor: Float[Tensor, "*#batch 3"] | None = None,
+) -> Float[Tensor, "*#batch c h_out w_out"]:
+    """
+    Rescale images to target shape without masks or intrinsics.
+    Used for image_original and image_inconsistent fields.
+    
+    This function reuses rescale_and_crop to avoid code duplication.
+    It creates dummy masks and intrinsics, then extracts only the rescaled images.
+    """
+    *batch_dims, c, h, w = images.shape
+    
+    # Create dummy masks (all ones) matching the image shape
+    dummy_masks = torch.ones(*batch_dims, h, w, dtype=images.dtype, device=images.device)
+    
+    # Create dummy intrinsics (identity matrices) matching the batch dimensions
+    # Intrinsics shape: [*batch, 3, 3]
+    # Use view and expand to match batch dimensions efficiently
+    dummy_intrinsics = torch.eye(3, dtype=images.dtype, device=images.device)
+    # Expand to match all batch dimensions: [3, 3] -> [*batch_dims, 3, 3]
+    # Add batch dimensions one by one
+    for batch_dim in batch_dims:
+        dummy_intrinsics = dummy_intrinsics.unsqueeze(0).expand(batch_dim, *dummy_intrinsics.shape)
+    
+    # Reuse the existing rescale_and_crop logic
+    rescaled_images, _, _, _ = rescale_and_crop(
+        images, dummy_masks, None, dummy_intrinsics, shape, pad, bgcolor
+    )
+    
+    return rescaled_images
+
+
 def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool = False, bgcolor: torch.Tensor | None = None) -> AnyViews:
     if "lbs_weights" in views and views["lbs_weights"].shape[-3:-1] != shape:
         lbs_weights = views["lbs_weights"]
@@ -202,6 +237,17 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool 
     }
     if lbs_weights is not None:
         new_views["lbs_weights"] = lbs_weights
+    
+    # Rescale image_original and image_inconsistent if they exist
+    if "image_original" in views:
+        new_views["image_original"] = rescale_images_only(
+            views["image_original"], shape, pad, bgcolor
+        )
+    if "image_inconsistent" in views:
+        new_views["image_inconsistent"] = rescale_images_only(
+            views["image_inconsistent"], shape, pad, bgcolor
+        )
+    
     return new_views
 
 
