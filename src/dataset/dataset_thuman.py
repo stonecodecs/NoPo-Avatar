@@ -55,6 +55,7 @@ class DatasetTHumanCfg(DatasetCfgCommon):
     load_lbs_weights: bool = False
     sample_rate: float = 1.0
     noise_scale: float = 0.0
+    load_inconsistent_images: bool = False
 
 
 @dataclass
@@ -185,8 +186,8 @@ class DatasetTHuman(IterableDataset):
                             use_smplx=True)
                         Rs.append(global_Rs)
                         Ts.append(global_Ts)
-                    Rs = torch.tensor(Rs)
-                    Ts = torch.tensor(Ts)
+                    Rs = torch.tensor(np.stack(Rs))
+                    Ts = torch.tensor(np.stack(Ts))
 
                 tpose_joints = example["tposes_joints"].reshape(-1, 55, 3)
                 cnl_Rs, cnl_Ts = get_canonical_tfms(self.template_tpose_joints, tpose_joints[0], use_smplx=True)
@@ -222,12 +223,27 @@ class DatasetTHuman(IterableDataset):
                 context_masks = self.convert_masks(context_masks)
                 target_images = [
                     example["images"][index.item()] for index in target_indices
-                ]
+                ]  # for iclight, these will be clones of original GT images
                 target_images = self.convert_images(target_images)
                 target_masks = [
                     example["masks"][index.item()] for index in target_indices
                 ]
                 target_masks = self.convert_masks(target_masks)
+
+                ref_mask = torch.zeros(len(context_indices), dtype=torch.bool)
+                ref_mask[torch.randint(0, len(context_indices), [1])] = True
+
+                # load inconsistent images for context views for all non-reference views
+                if self.cfg.load_inconsistent_images and "ic_images" in example:
+                    # for now, these share the same masks as context images (possibly change later)
+                    ic_images = [
+                        example["ic_images"][index.item()] for index in context_indices
+                    ]
+                    ic_images = self.convert_images(ic_images)
+                    # apply mask and change the context images to inconsistent images
+                    context_images = torch.stack([context_images[i] if ref_mask[i] else ic_images[i] for i in range(len(context_indices))])
+                    del ic_images
+                    # if we ever train on inconsistent POSES, then need a separate 'ic_masks' key for these
 
                 # Skip the example if the images don't have the right shape.
                 context_image_invalid = context_images.shape[1:] != (3, *self.cfg.original_image_shape)
@@ -286,7 +302,8 @@ class DatasetTHuman(IterableDataset):
                         "far": self.get_bound("far", len(context_indices)) / scale,
                         "index": context_indices,
                         "overlap": overlap,
-                        "use_smplx": True
+                        "use_smplx": True,
+                        "ref_mask": ref_mask,
                         # "canonical_vertices": example["canonical_vertex"],
                         # "canonical_lbs_weights": example["canonical_lbs_weights"],
                     },
@@ -305,7 +322,8 @@ class DatasetTHuman(IterableDataset):
                         "near": self.get_bound("near", len(target_indices)) / scale,
                         "far": self.get_bound("far", len(target_indices)) / scale,
                         "index": target_indices,
-                        "use_smplx": True
+                        "use_smplx": True,
+                        "ref_mask": ref_mask, # redundant and can remove, but why not
                     },
                     "scene": scene,
                     "bgcolor": bgcolor,

@@ -179,7 +179,7 @@ class ModelWrapper(LightningModule):
         # combine batch from different dataloaders
         if isinstance(batch, list):
             batch = batch[torch.randint(len(batch), size=(1,)).item()]
-        batch: BatchedExample = self.data_shim(batch)
+        batch: BatchedExample = self.data_shim(batch) # this is an image normalize operation
         if self.train_cfg.random_n_views:
             N = batch["context"]["image"].shape[1]
             n_views = np.random.randint(1, N + 1)
@@ -261,7 +261,7 @@ class ModelWrapper(LightningModule):
                 loss_dict[loss_fn.name + "_template"] = loss_template
 
             if "output_context" in output_aux and loss_fn.name in ["lpips", "mse", "ssim"]:
-                loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=False, weight="rgb")
+                loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=True, weight="rgb")
                 self.log(f"loss/{loss_fn.name}_context", loss_context)
                 loss_aux += loss_context
                 loss_dict[loss_fn.name + "_context"] = loss_context

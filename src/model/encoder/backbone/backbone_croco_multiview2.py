@@ -61,6 +61,7 @@ class BackboneCrocoMulti2Cfg:
     template_image_size: List[int] = 256, 256
     template_embed_dim: int = 1024
     disable_checkpointing: bool = False
+    use_ref_mask: bool = False  # by default
 
 
 class AsymmetricCroCoMulti2(CroCoNet):
@@ -83,6 +84,7 @@ class AsymmetricCroCoMulti2(CroCoNet):
 
         self.patch_embed_cls = cfg.patch_embed_cls
         self.croco_args = fill_default_args(croco_params[cfg.model], CroCoNet.__init__)
+        self.use_ref_mask = getattr(cfg, "use_ref_mask", False)  # default; but can be overridden if context has the 'ref_mask' key
 
         super().__init__(**croco_params[cfg.model])
 
@@ -113,6 +115,8 @@ class AsymmetricCroCoMulti2(CroCoNet):
 
     def _set_patch_embed(self, img_size=224, patch_size=16, enc_embed_dim=768, in_chans=3):
         in_chans = in_chans + self.intrinsics_embed_encoder_dim
+        if self.use_ref_mask:
+            in_chans += 1
         self.patch_embed = get_patch_embed(self.patch_embed_cls, img_size, patch_size, enc_embed_dim, in_chans)
 
         self.patch_embed_smpl = get_patch_embed(self.patch_embed_cls, img_size, patch_size, enc_embed_dim, 24 + 3 + self.intrinsics_embed_encoder_dim)
@@ -276,6 +280,13 @@ class AsymmetricCroCoMulti2(CroCoNet):
         if self.intrinsics_embed_loc == 'encoder' and (self.intrinsics_embed_type == 'token' or self.intrinsics_embed_type == 'linear'):
             intrinsic_embedding = self.intrinsic_encoder(context["intrinsics"].flatten(2))
             intrinsic_embedding_all = rearrange(intrinsic_embedding, "b v c -> (b v) c").contiguous().unsqueeze(1)
+
+        # add reference mask as additional channel to CONV input block
+        if "ref_mask" in context:
+            self.use_ref_mask = True  # override default with this
+            ref_mask = context["ref_mask"]
+            ref_mask = repeat(ref_mask, "b v -> b v 1 h w", h=h, w=w)
+            images_all = torch.cat((images_all, ref_mask), dim=2) # +1 to channel dim for images
 
         # step 1: encoder input images
         images_all = rearrange(images_all, "b v c h w -> (b v) c h w").contiguous()
