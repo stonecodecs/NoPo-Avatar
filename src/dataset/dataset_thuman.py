@@ -217,17 +217,21 @@ class DatasetTHuman(IterableDataset):
                     example["images"][index.item()] for index in context_indices
                 ]
                 context_images = self.convert_images(context_images)
+                context_images_gt = context_images
                 context_masks = [
                     example["masks"][index.item()] for index in context_indices
                 ]
                 context_masks = self.convert_masks(context_masks)
+
+                # NOTE: 'target' images in this case refer to novel views not used as context
+                # but still influences the loss
                 target_images = [
                     example["images"][index.item()] for index in target_indices
                 ]  # for iclight, these will be clones of original GT images
                 target_images = self.convert_images(target_images)
                 target_masks = [
                     example["masks"][index.item()] for index in target_indices
-                ]
+                ] 
                 target_masks = self.convert_masks(target_masks)
 
                 ref_mask = torch.zeros(len(context_indices), dtype=torch.bool)
@@ -297,6 +301,7 @@ class DatasetTHuman(IterableDataset):
                         "cnl_Ts": cnl_Ts[context_indices],
                         # "lbs_weights": lbs_weights[context_indices],
                         "image": context_images,
+                        "image_gt": context_images_gt, # for context, need these GTs.
                         "mask": context_masks,
                         "near": self.get_bound("near", len(context_indices)) / scale,
                         "far": self.get_bound("far", len(context_indices)) / scale,
@@ -317,7 +322,7 @@ class DatasetTHuman(IterableDataset):
                         "cnl_Rs": cnl_Rs[target_indices],
                         "cnl_Ts": cnl_Ts[target_indices],
                         # "lbs_weights": lbs_weights[target_indices],
-                        "image": target_images,
+                        "image": target_images, # supervising views
                         "mask": target_masks,
                         "near": self.get_bound("near", len(target_indices)) / scale,
                         "far": self.get_bound("far", len(target_indices)) / scale,

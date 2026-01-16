@@ -31,7 +31,7 @@ class LossMse(Loss[LossMseCfg, LossMseCfgWrapper]):
         compare_target: bool = True,
         weight: str = "",
     ) -> Float[Tensor, ""]:
-        image = batch["target"]["image"] if compare_target else batch["context"]["image"]
+        image = batch["target"]["image"] if compare_target else batch["context"]["image_gt"]
         delta = prediction.color - image
         dist = delta ** 2
 

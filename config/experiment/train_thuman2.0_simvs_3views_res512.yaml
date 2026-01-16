@@ -53,9 +53,8 @@ dataset:
     background_color: [-1, -1, -1]
 
     view_sampler:
-      name: aligned
       num_context_views: 3
-      num_target_views: 3
+      num_target_views: 4
       warm_up_steps: 150_000
 
     ## SimVS needs this to be True
@@ -69,7 +68,7 @@ optimizer:
 data_loader:
   train:
     batch_size: 1
-    num_workers: 2
+    num_workers: 4
 
 trainer:
   max_steps: 300_001

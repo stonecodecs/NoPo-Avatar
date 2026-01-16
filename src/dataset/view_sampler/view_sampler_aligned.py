@@ -38,8 +38,11 @@ class ViewSamplerAligned(ViewSampler[ViewSamplerAlignedCfg]):
         num_views, _, _ = extrinsics.shape
     
         # randomly sample without replacement (assuming unique images)
-        index_context = torch.randperm(num_views, device=device)[:self.cfg.num_context_views]
-        index_target = index_context[:self.cfg.num_target_views] # same as context indices
+        samples = torch.randperm(num_views, device=device)
+        index_context = samples[:self.cfg.num_context_views]
+        index_target = samples[:self.cfg.num_target_views] # same as context indices + more, if chosen
+        if len(index_context) < self.cfg.num_context_views:
+            index_context = torch.cat((index_context, samples[self.cfg.num_context_views:]))
         
         overlap = torch.tensor([0.5], dtype=torch.float32, device=device)  # dummy
         

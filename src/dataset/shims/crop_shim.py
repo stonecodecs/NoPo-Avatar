@@ -202,6 +202,14 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool 
     }
     if lbs_weights is not None:
         new_views["lbs_weights"] = lbs_weights
+    
+    # Also resize image_gt if it exists (used for context loss)
+    if "image_gt" in views:
+        # Use the same mask as image for consistency
+        image_gt, _, _, _ = rescale_and_crop(
+            views["image_gt"], views["mask"], None, views["intrinsics"], shape, pad, bgcolor)
+        new_views["image_gt"] = image_gt
+    
     return new_views
 
 

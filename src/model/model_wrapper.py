@@ -241,7 +241,7 @@ class ModelWrapper(LightningModule):
             if loss_fn.name in ["lbs_weights", "pts3d"]:
                 loss = loss_fn.forward(output, batch, gaussians_rgb, self.global_step)
             elif loss_fn.name == "noise":
-                loss = loss_fn.forward(output_aux["output_nosie"], batch, gaussians, self.global_step)
+                loss = loss_fn.forward(output_aux["output_noise"], batch, gaussians, self.global_step)
             else:
                 loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
@@ -261,7 +261,7 @@ class ModelWrapper(LightningModule):
                 loss_dict[loss_fn.name + "_template"] = loss_template
 
             if "output_context" in output_aux and loss_fn.name in ["lpips", "mse", "ssim"]:
-                loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=True, weight="rgb")
+                loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=False, weight="rgb")
                 self.log(f"loss/{loss_fn.name}_context", loss_context)
                 loss_aux += loss_context
                 loss_dict[loss_fn.name + "_context"] = loss_context

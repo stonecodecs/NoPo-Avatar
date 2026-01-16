@@ -48,7 +48,7 @@ class LossLpips(Loss[LossLpipsCfg, LossLpipsCfgWrapper]):
         if getattr(self.cfg, "weight" + weight_suffix) == 0:
             return 0.0
 
-        image = batch["target"]["image"] if compare_target else batch["context"]["image"]
+        image = batch["target"]["image"] if compare_target else batch["context"]["image_gt"]
 
         # Before the specified step, don't apply the loss.
         if global_step < self.cfg.apply_after_step:

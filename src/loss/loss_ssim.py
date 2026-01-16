@@ -90,7 +90,7 @@ class LossSsim(Loss[LossSsimCfg, LossSsimCfgWrapper]):
         if getattr(self.cfg, "weight" + weight_suffix) == 0:
             return 0.0
 
-        image = batch["target"]["image"] if compare_target else batch["context"]["image"]
+        image = batch["target"]["image"] if compare_target else batch["context"]["image_gt"]
 
         loss_ssim = 1 - ssim(
             rearrange(prediction.color, "b v c h w -> (b v) c h w"),
