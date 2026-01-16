@@ -282,9 +282,8 @@ class AsymmetricCroCoMulti2(CroCoNet):
             intrinsic_embedding_all = rearrange(intrinsic_embedding, "b v c -> (b v) c").contiguous().unsqueeze(1)
 
         # add reference mask as additional channel to CONV input block
-        if "ref_mask" in context:
-            self.use_ref_mask = True  # override default with this
-            ref_mask = context["ref_mask"]
+        if "ref_mask" in context and self.use_ref_mask:
+            ref_mask = context["ref_mask"]  # should be randomly sampled from dataset_thuman.py
             ref_mask = repeat(ref_mask, "b v -> b v 1 h w", h=h, w=w)
             images_all = torch.cat((images_all, ref_mask), dim=2) # +1 to channel dim for images
 
