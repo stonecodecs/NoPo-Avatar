@@ -5,12 +5,14 @@ from ..types import Stage
 from .view_sampler import ViewSampler
 from .view_sampler_all import ViewSamplerAll, ViewSamplerAllCfg
 from .view_sampler_arbitrary import ViewSamplerArbitrary, ViewSamplerArbitraryCfg
+from .view_sampler_aligned import ViewSamplerAligned, ViewSamplerAlignedCfg
 from .view_sampler_bounded import ViewSamplerBounded, ViewSamplerBoundedCfg
 from .view_sampler_evaluation import ViewSamplerEvaluation, ViewSamplerEvaluationCfg
 from .view_sampler_uniform import ViewSamplerUniform, ViewSamplerUniformCfg
 
 VIEW_SAMPLERS: dict[str, ViewSampler[Any]] = {
     "all": ViewSamplerAll,
+    "aligned": ViewSamplerAligned,
     "arbitrary": ViewSamplerArbitrary,
     "bounded": ViewSamplerBounded,
     "evaluation": ViewSamplerEvaluation,
@@ -18,7 +20,8 @@ VIEW_SAMPLERS: dict[str, ViewSampler[Any]] = {
 }
 
 ViewSamplerCfg = (
-    ViewSamplerArbitraryCfg
+    ViewSamplerAlignedCfg
+    | ViewSamplerArbitraryCfg
     | ViewSamplerBoundedCfg
     | ViewSamplerEvaluationCfg
     | ViewSamplerAllCfg
