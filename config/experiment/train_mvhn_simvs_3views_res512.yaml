@@ -8,8 +8,8 @@ defaults:
   - override /loss: [mse, lpips, chamfer, projection, lbs_weights]
 
 wandb:
-  name: tpose_res576
-  tags: [mvhn, 576x576]
+  name: tpose_res512
+  tags: [mvhn, 512x512]
 
 model:
   encoder:
@@ -23,9 +23,10 @@ model:
 
     backbone:
       template_encoder_free: true
-      template_image_size: [576, 576]
+      template_image_size: [512, 512]
       intrinsics_embed_loc: "none"
       disable_checkpointing: true
+      use_ref_mask: true  # SimVS functionality needs this to be True
 
   decoder:
     make_scale_invariant: false
@@ -43,16 +44,19 @@ loss:
 
 dataset:
   mvhn:
+    # no 'roots' here since we use MVHN directly from PVC
     augment: true
-    template_image_shape: [576, 576]
-    input_image_shape: [576, 576]
+    template_image_shape: [512, 512]
+    input_image_shape: [512, 512]
     load_template_uv: true
     load_lbs_weights: true
     background_color: [-1, -1, -1]
 
     view_sampler:
       num_context_views: 3
+      num_target_views: 4
       warm_up_steps: 150_000
+    load_inconsistent_images: true  # if enabled, we use inconsistent images for context views for all non-reference views
 
 optimizer:
   lr: 5e-5
@@ -62,7 +66,7 @@ optimizer:
 data_loader:
   train:
     batch_size: 1
-    num_workers: 8
+    num_workers: 2
 
 trainer:
   max_steps: 300_001

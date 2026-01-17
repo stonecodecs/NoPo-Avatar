@@ -117,6 +117,14 @@ class DatasetMVHN(Dataset):
         self.cfg = cfg
         self.stage = stage
         self.view_sampler = view_sampler
+
+        # LET VIEW_SAMPLER OVERWRITE cfg.num_images!
+        # would be cleaner to just refine this + dataloader.py but nobody got time for that (yet)
+        if self.view_sampler is not None:
+            self.cfg.num_images = self.view_sampler.num_context_views + self.view_sampler.num_target_views
+        # if no view sampler, keep original num_images
+        # and in training loss, we only look at the input views only (no target views)
+        # (this is not really desired, so encouraged to use view sampler in the configs)
         
         # Set defaults
         if self.cfg.background_color is None:
@@ -306,58 +314,29 @@ class DatasetMVHN(Dataset):
             extrinsics = mvhn_batch['c2w']  # [N, 4, 4]
             intrinsics = mvhn_batch['K']  # [N, 3, 3]
             # TODO compare with thuman camera parameters (scale and center as expected by the model)
+            # later, convert camera coordinate conventions to match THuman (y-vertical rather than z)
             
             # Get reference mask and input mask
             ref_mask = mvhn_batch['ref_mask']  # [N] bool
             
             # Context views: all sampled views
-            context_indices = torch.arange(num_views)
-            
-            # For targets, we could sample additional views, but for now
-            # we'll use the ground truth of the same views
-            # In the future, you might want to sample different views for targets
-            target_indices = context_indices.clone()
-            
-            # Images for context
-            # Use inconsistent images (ic_rgb) for non-reference frames if use_inconsistent is True
-            if mvhn_batch.get('use_inconsistent', False):
-                context_images = mvhn_batch.get('ic_rgb')
-                # Ensure ic_rgb is a tensor (it might be a list)
-                if isinstance(context_images, list):
-                    context_images = torch.stack(context_images, dim=0)
-                elif not isinstance(context_images, torch.Tensor):
-                    # Fallback to frames if ic_rgb is not available or wrong type
-                    context_images = mvhn_batch['frames']
-            else: # otherwise, already consistent set => use frames again
-                context_images = mvhn_batch['frames']  # [N, 3, H, W]
-            
-            # Ensure context_images is a tensor
-            if not isinstance(context_images, torch.Tensor):
-                if isinstance(context_images, list):
-                    context_images = torch.stack(context_images, dim=0)
-                else:
-                    raise ValueError(f"context_images is not a tensor or list: {type(context_images)}")
-            
-            # Images for target - always ground truth
-            context_images[ref_mask] = frames[ref_mask] # replace reference frame with GT
-            target_images = frames  # Use the already-converted tensor
+            if self.view_sampler is not None:
+                # all_indices sets the reference view as idx 0
+                ref_idx = torch.argmax(ref_mask.int()).item()
+                all_indices = torch.roll(torch.arange(num_views), -ref_idx)
+                context_indices = all_indices[:self.cfg.view_sampler.num_context_views]
+                target_indices = all_indices[self.cfg.view_sampler.num_context_views:]
+            else: # use the same views
+                context_indices = torch.arange(num_views)
+                target_indices = context_indices.clone()
+                
+            context_images = mvhn_batch['ic_rgb']
+            context_images_gt = mvhn_batch['frames']
+            target_images = mvhn_batch['frames']
             
             # Masks
             context_masks = mvhn_batch['frames_masks'].squeeze(1)  # [N, H, W]
             target_masks = mvhn_batch['frames_masks'].squeeze(1)  # [N, H, W]
-            
-            # Ensure masks are tensors
-            if not isinstance(context_masks, torch.Tensor):
-                if isinstance(context_masks, list):
-                    context_masks = torch.stack(context_masks, dim=0)
-                else:
-                    raise ValueError(f"context_masks is not a tensor or list: {type(context_masks)}")
-            
-            if not isinstance(target_masks, torch.Tensor):
-                if isinstance(target_masks, list):
-                    target_masks = torch.stack(target_masks, dim=0)
-                else:
-                    raise ValueError(f"target_masks is not a tensor or list: {type(target_masks)}")
             
             # Near and far planes
             near_context = torch.full((num_views,), self.cfg.near, dtype=torch.float32)
@@ -466,7 +445,7 @@ class DatasetMVHN(Dataset):
                     smplx_params_torch[key] = torch.from_numpy(value).float()
                 else:
                     smplx_params_torch[key] = torch.tensor(value).float()
-            
+
             # Construct the output in THuman format; post-dataloader, these will be in the expected shapes [1,...]
             example = {
                 "context": {
@@ -479,12 +458,14 @@ class DatasetMVHN(Dataset):
                     "cnl_Rs": cnl_Rs_context[context_indices],  # [N, 55, 3, 3]
                     "cnl_Ts": cnl_Ts_context[context_indices],  # [N, 55, 3]
                     "image": context_images[context_indices],  # [N, 3, H, W]
+                    "image_gt": context_images_gt[context_indices], # [N, 3, H, W]
                     "mask": context_masks[context_indices],  # [N, H, W]
                     "near": near_context[context_indices],  # [N]
                     "far": far_context[context_indices],  # [N]
                     "index": context_indices,  # [N]
                     "overlap": overlap[context_indices],  # [N]
                     "use_smplx": True,
+                    "ref_mask": ref_mask[context_indices],
                 },
                 "target": {
                     "extrinsics": extrinsics[target_indices],  # [N, 4, 4]
