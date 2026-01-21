@@ -17,6 +17,7 @@ from src.misc.body_utils import get_canonical_tfms, get_canonical_global_tfms, b
 from dataloader import MVHumanNetDataset, custom_collate
 from .dataset import DatasetCfgCommon
 from .view_sampler import ViewSamplerCfg
+from src.misc.body_utils import apply_global_tfm_to_camera
 
 def expand_only_include(only_include):
     if isinstance(only_include, str): # in the format ex: "100001-102000,102020-104000"

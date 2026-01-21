@@ -14,6 +14,7 @@ class LossMseCfg:
     weight: float
     use_conf: bool
     alpha: float
+    apply_mask: bool = False
 
 
 @dataclass
@@ -32,7 +33,14 @@ class LossMse(Loss[LossMseCfg, LossMseCfgWrapper]):
         weight: str = "",
     ) -> Float[Tensor, ""]:
         image = batch["target"]["image"] if compare_target else batch["context"]["image_gt"]
-        delta = prediction.color - image
+        # add mask; only consider the human region
+        if self.cfg.apply_mask:
+            mask = batch["target"]["mask"] if compare_target else batch["context"]["mask"]
+            mask = mask if image.shape[1] == mask.shape[1] else mask[:, 1:] # account for template mask concat
+            mask_expanded = mask.unsqueeze(2)
+            delta = (prediction.color - image) * mask_expanded
+        else:
+            delta = prediction.color - image
         dist = delta ** 2
 
         if self.cfg.use_conf:

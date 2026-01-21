@@ -242,6 +242,8 @@ class ModelWrapper(LightningModule):
                 loss = loss_fn.forward(output, batch, gaussians_rgb, self.global_step)
             elif loss_fn.name == "noise":
                 loss = loss_fn.forward(output_aux["output_noise"], batch, gaussians, self.global_step)
+            elif loss_fn.name == "mse":
+                loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             else:
                 loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
