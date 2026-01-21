@@ -25,6 +25,7 @@ from ..dataset.data_module import get_data_shim
 from ..dataset.types import BatchedExample
 from ..evaluation.metrics import compute_lpips, compute_psnr, compute_ssim
 from ..global_cfg import get_cfg
+from omegaconf import OmegaConf
 from ..loss import Loss
 from ..loss.loss_point import Regr3D
 from ..loss.loss_ssim import ssim
@@ -91,6 +92,7 @@ class TestCfg:
     refine_gaussians_steps: int = 10
     pose_seq: str | None = None
     optim_pose: bool = False
+    metrics_json_path: Path | None = None  # Path to JSON file to save metrics
 
 
 @dataclass
@@ -1085,6 +1087,106 @@ class ModelWrapper(LightningModule):
             self.test_cfg.output_path / name / "peak_memory.json"
         )
         self.benchmarker.summarize()
+        
+        # Save metrics to JSON if compute_scores is enabled and metrics_json_path is set
+        if self.test_cfg.compute_scores and self.test_cfg.metrics_json_path is not None:
+            if hasattr(self, 'running_metrics') and self.running_metrics:
+                # Get checkpoint identifier
+                # Try to get from trainer's ckpt_path first, then config, then use wandb name
+                checkpoint_id = name
+                if hasattr(self.trainer, 'ckpt_path') and self.trainer.ckpt_path is not None:
+                    # Use checkpoint filename as identifier (without extension)
+                    checkpoint_id = Path(self.trainer.ckpt_path).stem
+                else:
+                    # Fallback: try to extract from checkpoint path in config if available
+                    cfg = get_cfg()
+                    if cfg and 'checkpointing' in cfg and cfg['checkpointing'].get('load'):
+                        checkpoint_path_str = cfg['checkpointing']['load']
+                        if checkpoint_path_str and not str(checkpoint_path_str).startswith('wandb://'):
+                            checkpoint_id = Path(checkpoint_path_str).stem
+                
+                # Get dataset identifier
+                cfg = get_cfg()
+                dataset_parts = []
+                if cfg and 'dataset' in cfg:
+                    # Convert OmegaConf to regular Python dict for easier access
+                    dataset_list = OmegaConf.to_container(cfg['dataset'], resolve=True)
+                    if dataset_list:
+                        for dataset_cfg_wrapper in dataset_list:
+                            # Extract dataset name and root info
+                            # Handle different dataset types (thuman, huge100k, mvhn)
+                            if isinstance(dataset_cfg_wrapper, dict):
+                                if 'thuman' in dataset_cfg_wrapper:
+                                    thuman_cfg = dataset_cfg_wrapper['thuman']
+                                    dataset_name = thuman_cfg.get('name', 'thuman')
+                                    roots = thuman_cfg.get('roots', [])
+                                    # Extract version from root path (e.g., "thuman2.0" or "thuman2.1")
+                                    if roots and len(roots) > 0:
+                                        root_path = str(roots[0])
+                                        # Extract version from path like "datasets/thuman2.1" -> "2.1"
+                                        if 'thuman' in root_path:
+                                            # Find thuman in path and extract what comes after
+                                            parts = root_path.split('thuman')
+                                            if len(parts) > 1:
+                                                version = parts[1].strip('/').split('/')[0]
+                                                if version:
+                                                    dataset_parts.append(f"{dataset_name}{version}")
+                                                else:
+                                                    dataset_parts.append(dataset_name)
+                                            else:
+                                                dataset_parts.append(dataset_name)
+                                        else:
+                                            dataset_parts.append(dataset_name)
+                                    else:
+                                        dataset_parts.append(dataset_name)
+                                elif 'huge100k' in dataset_cfg_wrapper:
+                                    huge100k_cfg = dataset_cfg_wrapper['huge100k']
+                                    dataset_parts.append(huge100k_cfg.get('name', 'huge100k'))
+                                elif 'mvhn' in dataset_cfg_wrapper:
+                                    mvhn_cfg = dataset_cfg_wrapper['mvhn']
+                                    dataset_parts.append(mvhn_cfg.get('name', 'mvhn'))
+                
+                # Combine checkpoint and dataset identifiers
+                if dataset_parts:
+                    dataset_str = '_'.join(dataset_parts)
+                    checkpoint_id = f"{checkpoint_id}_{dataset_str}"
+                
+                # Convert metrics to JSON-serializable format
+                metrics_dict = {
+                    k: float(v.item() if isinstance(v, Tensor) else v)
+                    for k, v in self.running_metrics.items()
+                }
+                
+                # Load existing JSON if it exists
+                metrics_json_path = Path(self.test_cfg.metrics_json_path)
+                metrics_json_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                all_metrics = {}
+                if metrics_json_path.exists():
+                    try:
+                        with open(metrics_json_path, 'r') as f:
+                            all_metrics = json.load(f)
+                    except (json.JSONDecodeError, IOError) as e:
+                        print(f"Warning: Could not load existing metrics JSON: {e}. Starting fresh.")
+                
+                # Update with current checkpoint metrics
+                all_metrics[checkpoint_id] = metrics_dict
+                
+                # Also save per-overlap metrics if available
+                if hasattr(self, 'running_metrics_sub') and self.running_metrics_sub:
+                    overlap_metrics = {}
+                    for overlap_tag, metrics in self.running_metrics_sub.items():
+                        overlap_metrics[overlap_tag] = {
+                            k: float(v.item() if isinstance(v, Tensor) else v)
+                            for k, v in metrics.items()
+                        }
+                    all_metrics[f"{checkpoint_id}_by_overlap"] = overlap_metrics
+                
+                # Save updated JSON
+                with open(metrics_json_path, 'w') as f:
+                    json.dump(all_metrics, f, indent=2)
+                
+                print(f"Saved metrics for checkpoint '{checkpoint_id}' to {metrics_json_path}")
 
     @rank_zero_only
     def validation_step(self, batch, batch_idx, dataloader_idx=0):

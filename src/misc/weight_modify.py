@@ -102,13 +102,19 @@ def adapt_input_conv(in_chans, conv_weight):
         else:
             # NOTE this strategy should be better than random init, but there could be other combinations of
             # the original RGB input layer weights that'd work better for specific cases.
-            repeat = int(math.ceil(in_chans / 3))
-            conv_weight = conv_weight.repeat(1, repeat, 1, 1)[:, :in_chans, :, :]
-            conv_weight *= (3 / float(in_chans))
+            # repeat = int(math.ceil(in_chans / 3))
+            # conv_weight = conv_weight.repeat(1, repeat, 1, 1)[:, :in_chans, :, :]
+            # conv_weight *= (3 / float(in_chans))
 
             # instead of assigning the same weight to all channels, we can assign higher weight for original RGB channels
             # conv_weight[:, :3, :, :] = conv_weight[:, :3, :, :] * 0.5
             # conv_weight[:, 3:, :, :] = conv_weight[:, 3:, :, :] * 0.5 * (3 / float(in_chans - 3))
+
+            ## * zero initialize new channels instead
+            # Keep original RGB weights for first 3 channels, zero-initialize additional channels
+            new_conv_weight = torch.zeros(O, in_chans, J, K, dtype=conv_weight.dtype, device=conv_weight.device)
+            new_conv_weight[:, :3, :, :] = conv_weight  # Copy RGB weights to first 3 channels
+            conv_weight = new_conv_weight
 
     conv_weight = conv_weight.to(conv_type)
     return conv_weight

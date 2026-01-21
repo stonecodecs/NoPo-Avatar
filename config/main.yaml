@@ -69,6 +69,7 @@ test:
   save_lbs_weights: false
   pose_seq: null
   optim_pose: false
+  metrics_json_path: null
 
 seed: 111123
 

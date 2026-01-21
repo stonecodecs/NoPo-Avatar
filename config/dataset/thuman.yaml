@@ -26,3 +26,4 @@ load_supervision: false
 load_da_pose: false
 
 noise_scale: 0.0
+load_inconsistent_images: false

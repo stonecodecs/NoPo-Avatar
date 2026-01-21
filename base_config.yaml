@@ -137,6 +137,7 @@ test:
   save_lbs_weights: false
   pose_seq: null
   optim_pose: false
+  metrics_json_path: null
 seed: 111123
 trainer:
   max_steps: 300001
@@ -188,3 +189,4 @@ dataset:
     load_da_pose: false
     noise_scale: 0.0
     load_template_uv: true
+    load_inconsistent_images: false
