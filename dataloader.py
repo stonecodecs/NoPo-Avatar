@@ -1546,6 +1546,20 @@ class MVHumanNetDataset(Dataset):
         ])
 
         all_c2ws = torch.from_numpy(all_c2ws).float()
+        # get into SMPLX coordinate frame
+        R_z2y = torch.tensor([
+            [1, 0, 0], 
+            [0, 0, 1], 
+            [0, -1, 0]
+        ], dtype=torch.float32)
+
+        # Apply Global Transform to Camera Matrices (C2W)
+        # R_new = M @ R_old
+        all_c2ws[:, :3, :3] = R_z2y @ all_c2ws[:, :3, :3]
+        # t_new = M @ t_old
+        all_c2ws[:, :3, 3] = (R_z2y @ all_c2ws[:, :3, 3].unsqueeze(-1)).squeeze(-1)
+        # -------------------------------------------------
+
         c2ws = all_c2ws[sample_permutation]
         center = center_cameras(all_c2ws, c2ws)
         scale = scale_cameras(c2ws)
@@ -1593,12 +1607,26 @@ class MVHumanNetDataset(Dataset):
         # We need to apply the same transform: (transl - center) * scale
         if 'transl' in smplx_params:
             transl = torch.from_numpy(smplx_params['transl']).float()
+            transl = (R_z2y @ transl.unsqueeze(-1)).squeeze(-1)
             # center is shape [1, 3], transl is [3] or [1, 3]
             transl = (transl - center.squeeze(0)) # center the scene to the mean of cameras
             transl = transl * scale # scale the scene to the mean of cameras
             # potentially try bringing back scaling as well
             smplx_params['transl'] = transl.numpy()
 
+        from scipy.spatial.transform import Rotation as R
+        
+        R_mvhn_to_template = R.from_euler('ZY', [-np.pi/2, np.pi/2]).as_matrix()
+        
+        # Convert axis-angle to rotation matrix
+        global_orient_rot = R.from_rotvec(smplx_params['global_orient']).as_matrix()
+        
+        # Apply coordinate frame transformation: R_new = R_frame @ R_old
+        # (This transforms the rotation from MVHN frame to template frame)
+        transformed_rot = R_mvhn_to_template @ global_orient_rot
+
+        # Convert back to axis-angle
+        smplx_params['global_orient'] = R.from_matrix(transformed_rot).as_rotvec()
         try:
             output_dict = {
                 # "clean_latent": clean_latents,

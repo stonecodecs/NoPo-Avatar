@@ -7,6 +7,7 @@ Main use for this file is to use SMPLX parameters for canonical transformations 
 import torch
 import numpy as np
 import os
+import cv2
 from torch.utils.data import Dataset
 from typing import Optional
 from dataclasses import dataclass, field
@@ -314,8 +315,6 @@ class DatasetMVHN(Dataset):
             # these are scaled + centered already by MVHN dataloader (see dataloader.py)
             extrinsics = mvhn_batch['c2w']  # [N, 4, 4]
             intrinsics = mvhn_batch['K']  # [N, 3, 3]
-            # TODO compare with thuman camera parameters (scale and center as expected by the model)
-            # later, convert camera coordinate conventions to match THuman (y-vertical rather than z)
             
             # Get reference mask and input mask
             ref_mask = mvhn_batch['ref_mask']  # [N] bool
@@ -352,6 +351,49 @@ class DatasetMVHN(Dataset):
             # ========================================================================
             smplx_params = mvhn_batch['smplx_params']
             
+            # Apply global transformation to cameras relative to body pose
+            # This adjusts cameras to account for the body's global orientation and translation
+            Rh = smplx_params['global_orient']  # Axis-angle rotation [3]
+            Th = smplx_params['transl']  # Translation [3]
+            
+            # Convert c2w to w2c for apply_global_tfm_to_camera (it expects w2c)
+            w2cs = torch.linalg.inv(extrinsics)  # [N, 4, 4]
+            
+            # Build global transformation matrix (same as in apply_global_tfm_to_camera)
+            global_tfms = np.eye(4, dtype=np.float32)
+            global_rot = cv2.Rodrigues(Rh)[0].T  # [3, 3]
+            global_trans = Th  # [3]
+            global_tfms[:3, :3] = global_rot
+            global_tfms[:3, 3] = -global_rot.dot(global_trans)
+            global_tfms_inv = np.linalg.inv(global_tfms)  # [4, 4]
+            
+            # Apply transformation to each camera
+            extrinsics_transformed = []
+            for i in range(w2cs.shape[0]):
+                w2c = w2cs[i].cpu().numpy()  # [4, 4]
+                
+                # Apply transformation: w2c_new = w2c @ inv(global_tfms)
+                # Extract 3x3 rotation part for multiplication
+                w2c_rot = w2c[:3, :3]  # [3, 3]
+                w2c_trans = w2c[:3, 3]  # [3]
+                
+                # Transform rotation: R_new = R_old @ R_global_inv[:3, :3]
+                w2c_rot_transformed = w2c_rot @ global_tfms_inv[:3, :3]
+                
+                # Transform translation: t_new = R_old @ t_global_inv + t_old
+                w2c_trans_transformed = w2c_rot @ global_tfms_inv[:3, 3] + w2c_trans
+                
+                # Reconstruct full 4x4 w2c matrix
+                w2c_full = np.eye(4, dtype=np.float32)
+                w2c_full[:3, :3] = w2c_rot_transformed
+                w2c_full[:3, 3] = w2c_trans_transformed
+                
+                # Convert back to c2w
+                c2w_transformed = np.linalg.inv(w2c_full)
+                extrinsics_transformed.append(torch.from_numpy(c2w_transformed).float())
+            
+            extrinsics = torch.stack(extrinsics_transformed).to(extrinsics.device)
+            
             # 1. Compute joints for the current pose
             with torch.no_grad():
                 smplx_output = self.smplx_model(
@@ -377,7 +419,7 @@ class DatasetMVHN(Dataset):
                     return_full_pose=True
                 )
             tpose_joints = tpose_output.joints.detach().cpu()[0, :55]
-            
+     
             # 3. Compute Rs and Ts (Global rotation and translation for each joint)
             # We need to reshape the full pose to [55, 3]
             full_pose = smplx_output.full_pose.detach().cpu().numpy().reshape(55, 3)
@@ -385,6 +427,7 @@ class DatasetMVHN(Dataset):
             # but here we follow THuman's global RTs computation.
             
             # Compute canonical global transforms for the T-pose joints
+            # Note: tpose_joints are now in Template coordinate frame
             cnl_gtfms = get_canonical_global_tfms(tpose_joints.numpy(), use_smplx=True)
             
             # Compute destination Rs and Ts (local)
