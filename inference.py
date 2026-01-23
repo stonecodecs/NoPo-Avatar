@@ -466,31 +466,80 @@ def render_novel_views(target_context, smplx_params, output_dir, full_cfg, gauss
     target_c2w = target_context['extrinsics'].to(device)
     target_intrinsics = target_context['intrinsics'].to(device)
 
-    # For arbitrary poses without pose estimation, we use identity transforms
-    # This renders the person "as-is" in the novel camera viewpoint
-    num_v = target_c2w.shape[0] if target_c2w.ndim > 2 else 1
+    # Ensure proper batch and view dimensions
+    # target_c2w and target_intrinsics should be [batch, view, ...]
     if target_c2w.ndim == 2:
+        # Single view, single batch: [4, 4] -> [1, 1, 4, 4]
+        target_c2w = target_c2w[None, None]
+        num_v = 1
+    elif target_c2w.ndim == 3:
+        # Multiple views, no batch: [num_v, 4, 4] -> [1, num_v, 4, 4]
         target_c2w = target_c2w[None]
-    if target_intrinsics.ndim == 2:
-        target_intrinsics = target_intrinsics[None]
+        num_v = target_c2w.shape[1]
+    else:
+        # Already has batch dimension: [batch, num_v, 4, 4]
+        num_v = target_c2w.shape[1]
     
-    # Identity Human Pose (Static - no pose warping) # TODO: use pose estimation
-    # Rs = torch.eye(3, device=device)[None, None, None].repeat(1, num_v, 55, 1, 1)
-    # Ts = torch.zeros(1, num_v, 55, 3, device=device)
-    # cnl_Rs = torch.eye(3, device=device)[None, None, None].repeat(1, num_v, 69, 1, 1)
-    # cnl_Ts = torch.zeros(1, num_v, 69, 3, device=device)
+    if target_intrinsics.ndim == 2:
+        # Single view, single batch: [3, 3] -> [1, 1, 3, 3]
+        target_intrinsics = target_intrinsics[None, None]
+    elif target_intrinsics.ndim == 3:
+        # Multiple views, no batch: [num_v, 3, 3] -> [1, num_v, 3, 3]
+        target_intrinsics = target_intrinsics[None]
+    # else: already has batch dimension
 
+    # Ensure Rs, Ts, cnl_Rs, cnl_Ts have proper batch dimensions
     Rs = smplx_params['Rs'].to(device)
     Ts = smplx_params['Ts'].to(device)
-    cnl_Rs = smplx_params['cnl_Rs'].to(device) # (V,69,3,3)
-    cnl_Ts = smplx_params['cnl_Ts'].to(device) # (V,69,3)
+    cnl_Rs = smplx_params['cnl_Rs'].to(device)
+    cnl_Ts = smplx_params['cnl_Ts'].to(device)
+    
+    # Ensure batch dimension exists: should be [batch, view, ...]
+    if Rs.ndim == 4:  # [view, joints, 3, 3] -> [1, view, joints, 3, 3]
+        Rs = Rs[None]
+    if Ts.ndim == 3:  # [view, joints, 3] -> [1, view, joints, 3]
+        Ts = Ts[None]
+    if cnl_Rs.ndim == 4:  # [view, 69, 3, 3] -> [1, view, 69, 3, 3]
+        cnl_Rs = cnl_Rs[None]
+    if cnl_Ts.ndim == 3:  # [view, 69, 3] -> [1, view, 69, 3]
+        cnl_Ts = cnl_Ts[None]
+    
+    # Ensure batch dimension matches (take first batch if multiple)
+    if Rs.shape[0] > 1:
+        Rs = Rs[0:1]
+    if Ts.shape[0] > 1:
+        Ts = Ts[0:1]
+    if cnl_Rs.shape[0] > 1:
+        cnl_Rs = cnl_Rs[0:1]
+    if cnl_Ts.shape[0] > 1:
+        cnl_Ts = cnl_Ts[0:1]
+    
+    # Ensure view dimensions match num_v
+    # If smplx params have fewer views, repeat the last view
+    # If they have more views, take the first num_v views
+    if Rs.shape[1] < num_v:
+        # Repeat the last view
+        last_Rs = Rs[:, -1:, ...]
+        last_Ts = Ts[:, -1:, ...]
+        last_cnl_Rs = cnl_Rs[:, -1:, ...]
+        last_cnl_Ts = cnl_Ts[:, -1:, ...]
+        Rs = torch.cat([Rs, last_Rs.repeat(1, num_v - Rs.shape[1], 1, 1, 1)], dim=1)
+        Ts = torch.cat([Ts, last_Ts.repeat(1, num_v - Ts.shape[1], 1, 1)], dim=1)
+        cnl_Rs = torch.cat([cnl_Rs, last_cnl_Rs.repeat(1, num_v - cnl_Rs.shape[1], 1, 1, 1)], dim=1)
+        cnl_Ts = torch.cat([cnl_Ts, last_cnl_Ts.repeat(1, num_v - cnl_Ts.shape[1], 1, 1)], dim=1)
+    elif Rs.shape[1] > num_v:
+        # Take first num_v views
+        Rs = Rs[:, :num_v, ...]
+        Ts = Ts[:, :num_v, ...]
+        cnl_Rs = cnl_Rs[:, :num_v, ...]
+        cnl_Ts = cnl_Ts[:, :num_v, ...]
 
     # Render
     with torch.no_grad():
         output, _ = decoder.forward(
             gaussians,
-            target_c2w[None] if target_c2w.ndim == 3 else target_c2w, # Ensure batch dim
-            target_intrinsics[None] if target_intrinsics.ndim == 3 else target_intrinsics,
+            target_c2w,  # Already has batch dim
+            target_intrinsics,  # Already has batch dim
             Rs, Ts,
             torch.ones(1, num_v, device=device) * 0.1,  # near plane
             torch.ones(1, num_v, device=device) * 100.0,  # far plane
