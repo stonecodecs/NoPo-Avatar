@@ -344,8 +344,8 @@ class DatasetMVHN(Dataset):
             near_target = torch.full((num_views,), self.cfg.near, dtype=torch.float32)
             far_target = torch.full((num_views,), self.cfg.far, dtype=torch.float32)
             # cam_scale = mvhn_batch['cam_scale'].numpy()
-            cam_center = mvhn_batch['cam_center'].numpy()
-            cam_scale = mvhn_batch['cam_scale'].numpy()
+            # cam_center = mvhn_batch['cam_center'].numpy()
+            # cam_scale = mvhn_batch['cam_scale'].numpy()
             # ========================================================================
             # SMPLX parameters
             # ========================================================================
@@ -394,10 +394,11 @@ class DatasetMVHN(Dataset):
             
             extrinsics = torch.stack(extrinsics_transformed).to(extrinsics.device)
             
-            # 1. Compute joints for the current pose
+            # 1. Compute joints for the current pose (RELATIVE to body origin)
+            # We set global_orient and transl to zero because the cameras are already body-relative
             with torch.no_grad():
                 smplx_output = self.smplx_model(
-                    global_orient=torch.from_numpy(smplx_params['global_orient']).float().unsqueeze(0),
+                    global_orient=torch.zeros((1, 3), dtype=torch.float32),
                     body_pose=torch.from_numpy(smplx_params['body_pose']).float().unsqueeze(0),
                     left_hand_pose=torch.from_numpy(smplx_params['left_hand_pose']).float().unsqueeze(0),
                     right_hand_pose=torch.from_numpy(smplx_params['right_hand_pose']).float().unsqueeze(0),
@@ -406,7 +407,7 @@ class DatasetMVHN(Dataset):
                     reye_pose=torch.from_numpy(smplx_params['right_eye_pose']).float().unsqueeze(0),
                     betas=torch.from_numpy(smplx_params['betas']).float().unsqueeze(0),
                     expression=torch.from_numpy(smplx_params['expression']).float().unsqueeze(0),
-                    transl=torch.from_numpy(smplx_params['transl']).float().unsqueeze(0),
+                    transl=torch.zeros((1, 3), dtype=torch.float32),
                     return_full_pose=True
                 )
             
@@ -535,8 +536,8 @@ class DatasetMVHN(Dataset):
                 # ! ==== rest of these are debugging; delete later ====
                 "ref_mask": ref_mask,
                 "smplx_params": smplx_params_torch,  # Original SMPLX parameters used to generate Rs/Ts
-                "cam_center": cam_center,
-                "cam_scale": cam_scale,
+                # "cam_center": cam_center,
+                # "cam_scale": cam_scale,
             }
             
             # Add static template information if loaded (same as THuman dataset)

@@ -302,10 +302,11 @@ class RandomBBoxCropper(object):
     NOTE: images are NOT resized to (576, 576) here!
     - padding: [left, top, right, bottom] (in pixels) only for deterministic crop!
     """
-    def __init__(self, random_crop=True, random_crop_prob=1.0, crop_size_bounds=None, padding=[0,0,0,0]):
+    def __init__(self, random_crop=True, random_crop_prob=1.0, crop_size_bounds=None, padding=[0,0,0,0], output_size=576):
         self.crop_size_bounds = crop_size_bounds
         self.random_crop = random_crop
         self.random_crop_prob = random_crop_prob
+        self.output_size = output_size
         if not self.random_crop:
             self.random_crop_prob = 0.0
 
@@ -401,7 +402,7 @@ class RandomBBoxCropper(object):
             padding_mode=True
         )
 
-        scale = 576.0 / (bbox_max_dim + self.padding[0] + self.padding[2])
+        scale = float(self.output_size) / (bbox_max_dim + self.padding[0] + self.padding[2])
         rel_bbox = (rel_bbox * scale.view(-1, 1)).int()
 
         return {
@@ -477,9 +478,9 @@ class RandomBBoxCropper(object):
             face_bboxes_new[no_face_mask, 1] = face_bboxes_new[no_face_mask, 1] - y1[no_face_mask].to(torch.float32)
             face_bboxes_new[no_face_mask, 2] = face_bboxes_new[no_face_mask, 2] - x1[no_face_mask].to(torch.float32)
             face_bboxes_new[no_face_mask, 3] = face_bboxes_new[no_face_mask, 3] - y1[no_face_mask].to(torch.float32)
-            face_bboxes_new[no_face_mask] = face_bboxes_new[no_face_mask] * (576.0 / torch.maximum((x2 - x1)[no_face_mask].to(torch.float32), (y2 - y1)[no_face_mask].to(torch.float32)).unsqueeze(-1))
+            face_bboxes_new[no_face_mask] = face_bboxes_new[no_face_mask] * (float(self.output_size) / torch.maximum((x2 - x1)[no_face_mask].to(torch.float32), (y2 - y1)[no_face_mask].to(torch.float32)).unsqueeze(-1))
             face_bboxes_new[~no_face_mask] = -1
-            oob_mask = (face_bboxes_new < 0).any(dim=-1) | (face_bboxes_new > 576.0).any(dim=1)
+            oob_mask = (face_bboxes_new < 0).any(dim=-1) | (face_bboxes_new > float(self.output_size)).any(dim=1)
             face_bboxes_new[oob_mask] = -1
             face_bboxes_new = face_bboxes_new.to(torch.int32)
         else:
@@ -761,7 +762,8 @@ class MVHumanNetDataset(Dataset):
             self.cropper = RandomBBoxCropper(
                 random_crop=self.random_crop,
                 random_crop_prob=self.random_crop_prob,
-                padding=self.crop_padding
+                padding=self.crop_padding,
+                output_size=self.target_shape[0]
             )
             self.transform = T.Compose([
                 T.Resize(self.target_shape),
@@ -1546,23 +1548,31 @@ class MVHumanNetDataset(Dataset):
         ])
 
         all_c2ws = torch.from_numpy(all_c2ws).float()
-        # get into SMPLX coordinate frame
-        R_z2y = torch.tensor([
-            [1, 0, 0], 
-            [0, 0, 1], 
-            [0, -1, 0]
+        # Define consistent coordinate frame transformation (MVHN -> Template)
+        # MVHN: x=front, y=right, z=down (-z=up)
+        # Template: x=right, y=up, z=front
+        # Proper rotation mapping:
+        #   new_y (head) = -old_z
+        #   new_z (front) = old_x
+        #   new_x (side) = -old_y (flipped to keep right-handed)
+        R_mvhn_to_template = torch.tensor([
+            [ 0, -1,  0], 
+            [ 0,  0, -1], 
+            [ 1,  0,  0]
         ], dtype=torch.float32)
 
         # Apply Global Transform to Camera Matrices (C2W)
-        # R_new = M @ R_old
-        all_c2ws[:, :3, :3] = R_z2y @ all_c2ws[:, :3, :3]
-        # t_new = M @ t_old
-        all_c2ws[:, :3, 3] = (R_z2y @ all_c2ws[:, :3, 3].unsqueeze(-1)).squeeze(-1)
+        # R_new = M @ R_old (rotates the coordinate axes)
+        all_c2ws[:, :3, :3] = R_mvhn_to_template @ all_c2ws[:, :3, :3]
+        # t_new = M @ t_old (rotates the camera position)
+        all_c2ws[:, :3, 3] = (R_mvhn_to_template @ all_c2ws[:, :3, 3].unsqueeze(-1)).squeeze(-1)
         # -------------------------------------------------
 
         c2ws = all_c2ws[sample_permutation]
-        center = center_cameras(all_c2ws, c2ws)
-        scale = scale_cameras(c2ws)
+        # center = center_cameras(all_c2ws, c2ws)
+        # scale = scale_cameras(c2ws)
+        center = torch.zeros((1, 3))
+        scale = 1.0
 
         w2cs = torch.linalg.inv(c2ws)
         src_camera_idx = input_target_mask.to(torch.int).argmax().item()
@@ -1607,26 +1617,29 @@ class MVHumanNetDataset(Dataset):
         # We need to apply the same transform: (transl - center) * scale
         if 'transl' in smplx_params:
             transl = torch.from_numpy(smplx_params['transl']).float()
-            transl = (R_z2y @ transl.unsqueeze(-1)).squeeze(-1)
+            # Apply the SAME coordinate frame transformation as used for cameras
+            transl = (R_mvhn_to_template @ transl.unsqueeze(-1)).squeeze(-1)
+            
             # center is shape [1, 3], transl is [3] or [1, 3]
-            transl = (transl - center.squeeze(0)) # center the scene to the mean of cameras
-            transl = transl * scale # scale the scene to the mean of cameras
+            # transl = (transl - center.squeeze(0)) # center the scene to the mean of cameras
+            # transl = transl * scale # scale the scene to the mean of cameras
             # potentially try bringing back scaling as well
             smplx_params['transl'] = transl.numpy()
 
-        from scipy.spatial.transform import Rotation as R
+        from scipy.spatial.transform import Rotation as R_sci
         
-        R_mvhn_to_template = R.from_euler('ZY', [-np.pi/2, np.pi/2]).as_matrix()
+        # Use the SAME matrix for orientation (converted to numpy)
+        R_mvhn_to_template_np = R_mvhn_to_template.numpy()
         
         # Convert axis-angle to rotation matrix
-        global_orient_rot = R.from_rotvec(smplx_params['global_orient']).as_matrix()
+        global_orient_rot = R_sci.from_rotvec(smplx_params['global_orient']).as_matrix()
         
         # Apply coordinate frame transformation: R_new = R_frame @ R_old
         # (This transforms the rotation from MVHN frame to template frame)
-        transformed_rot = R_mvhn_to_template @ global_orient_rot
+        transformed_rot = R_mvhn_to_template_np @ global_orient_rot
 
         # Convert back to axis-angle
-        smplx_params['global_orient'] = R.from_matrix(transformed_rot).as_rotvec()
+        smplx_params['global_orient'] = R_sci.from_matrix(transformed_rot).as_rotvec()
         try:
             output_dict = {
                 # "clean_latent": clean_latents,
@@ -1646,8 +1659,8 @@ class MVHumanNetDataset(Dataset):
                 "subject_id": subject_id,
                 "timestep": timestep,
                 "smplx_params": smplx_params,
-                "cam_center": center, # used for centering SMPLX
-                "cam_scale": scale
+                # "cam_center": center, # used for centering SMPLX
+                # "cam_scale": scale
             }
 
             if self.arcface_embeddings_dir is not None:
