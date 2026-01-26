@@ -358,47 +358,21 @@ class DatasetMVHN(Dataset):
             
             # Convert c2w to w2c for apply_global_tfm_to_camera (it expects w2c)
             w2cs = torch.linalg.inv(extrinsics)  # [N, 4, 4]
-            
-            # Build global transformation matrix (same as in apply_global_tfm_to_camera)
-            global_tfms = np.eye(4, dtype=np.float32)
-            global_rot = cv2.Rodrigues(Rh)[0].T  # [3, 3]
-            global_trans = Th  # [3]
-            global_tfms[:3, :3] = global_rot
-            global_tfms[:3, 3] = -global_rot.dot(global_trans)
-            global_tfms_inv = np.linalg.inv(global_tfms)  # [4, 4]
-            
-            # Apply transformation to each camera
-            extrinsics_transformed = []
-            for i in range(w2cs.shape[0]):
-                w2c = w2cs[i].cpu().numpy()  # [4, 4]
-                
-                # Apply transformation: w2c_new = w2c @ inv(global_tfms)
-                # Extract 3x3 rotation part for multiplication
-                w2c_rot = w2c[:3, :3]  # [3, 3]
-                w2c_trans = w2c[:3, 3]  # [3]
-                
-                # Transform rotation: R_new = R_old @ R_global_inv[:3, :3]
-                w2c_rot_transformed = w2c_rot @ global_tfms_inv[:3, :3]
-                
-                # Transform translation: t_new = R_old @ t_global_inv + t_old
-                w2c_trans_transformed = w2c_rot @ global_tfms_inv[:3, 3] + w2c_trans
-                
-                # Reconstruct full 4x4 w2c matrix
-                w2c_full = np.eye(4, dtype=np.float32)
-                w2c_full[:3, :3] = w2c_rot_transformed
-                w2c_full[:3, 3] = w2c_trans_transformed
-                
-                # Convert back to c2w
-                c2w_transformed = np.linalg.inv(w2c_full)
-                extrinsics_transformed.append(torch.from_numpy(c2w_transformed).float())
-            
-            extrinsics = torch.stack(extrinsics_transformed).to(extrinsics.device)
+            extrinsics_list = []
+            for w2c in w2cs:
+                extrinsics_list.append(
+                    torch.linalg.inv(
+                        torch.from_numpy(apply_global_tfm_to_camera(w2c.numpy(), Rh.numpy(), Th.numpy())).float()
+                    )
+                )
+            extrinsics = torch.stack(extrinsics_list)
             
             # 1. Compute joints for the current pose (RELATIVE to body origin)
             # We set global_orient and transl to zero because the cameras are already body-relative
             with torch.no_grad():
                 smplx_output = self.smplx_model(
                     global_orient=torch.zeros((1, 3), dtype=torch.float32),
+                    # global_orient=Rh.float().unsqueeze(0),
                     body_pose=torch.from_numpy(smplx_params['body_pose']).float().unsqueeze(0),
                     left_hand_pose=torch.from_numpy(smplx_params['left_hand_pose']).float().unsqueeze(0),
                     right_hand_pose=torch.from_numpy(smplx_params['right_hand_pose']).float().unsqueeze(0),
@@ -408,6 +382,7 @@ class DatasetMVHN(Dataset):
                     betas=torch.from_numpy(smplx_params['betas']).float().unsqueeze(0),
                     expression=torch.from_numpy(smplx_params['expression']).float().unsqueeze(0),
                     transl=torch.zeros((1, 3), dtype=torch.float32),
+                    # transl=Th.float().unsqueeze(0),
                     return_full_pose=True
                 )
             

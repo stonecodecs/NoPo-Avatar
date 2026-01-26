@@ -1547,32 +1547,20 @@ class MVHumanNetDataset(Dataset):
             get_c2w(cam) for cam in frames_info.keys()
         ])
 
-        all_c2ws = torch.from_numpy(all_c2ws).float()
-        # Define consistent coordinate frame transformation (MVHN -> Template)
-        # MVHN: x=front, y=right, z=down (-z=up)
-        # Template: x=right, y=up, z=front
-        # Proper rotation mapping:
-        #   new_y (head) = -old_z
-        #   new_z (front) = old_x
-        #   new_x (side) = -old_y (flipped to keep right-handed)
-        R_mvhn_to_template = torch.tensor([
+        R_mvhn_to_template = torch.eye(4)
+        R_mvhn_to_template[:3,:3] = torch.tensor([
             [ 0, -1,  0], 
             [ 0,  0, -1], 
             [ 1,  0,  0]
         ], dtype=torch.float32)
 
-        # Apply Global Transform to Camera Matrices (C2W)
-        # R_new = M @ R_old (rotates the coordinate axes)
-        all_c2ws[:, :3, :3] = R_mvhn_to_template @ all_c2ws[:, :3, :3]
-        # t_new = M @ t_old (rotates the camera position)
-        all_c2ws[:, :3, 3] = (R_mvhn_to_template @ all_c2ws[:, :3, 3].unsqueeze(-1)).squeeze(-1)
-        # -------------------------------------------------
+        all_c2ws = R_mvhn_to_template @ torch.from_numpy(all_c2ws).float()
 
         c2ws = all_c2ws[sample_permutation]
         # center = center_cameras(all_c2ws, c2ws)
         # scale = scale_cameras(c2ws)
-        center = torch.zeros((1, 3))
-        scale = 1.0
+        # center = torch.zeros((1, 3))
+        # scale = 1.0
 
         w2cs = torch.linalg.inv(c2ws)
         src_camera_idx = input_target_mask.to(torch.int).argmax().item()
@@ -1618,28 +1606,24 @@ class MVHumanNetDataset(Dataset):
         if 'transl' in smplx_params:
             transl = torch.from_numpy(smplx_params['transl']).float()
             # Apply the SAME coordinate frame transformation as used for cameras
-            transl = (R_mvhn_to_template @ transl.unsqueeze(-1)).squeeze(-1)
+            # transl = transl * camera_scale
+            transl = (R_mvhn_to_template[:3,:3] @ transl)
             
             # center is shape [1, 3], transl is [3] or [1, 3]
             # transl = (transl - center.squeeze(0)) # center the scene to the mean of cameras
             # transl = transl * scale # scale the scene to the mean of cameras
             # potentially try bringing back scaling as well
-            smplx_params['transl'] = transl.numpy()
+            smplx_params['transl'] = transl
 
         from scipy.spatial.transform import Rotation as R_sci
-        
-        # Use the SAME matrix for orientation (converted to numpy)
-        R_mvhn_to_template_np = R_mvhn_to_template.numpy()
-        
-        # Convert axis-angle to rotation matrix
         global_orient_rot = R_sci.from_rotvec(smplx_params['global_orient']).as_matrix()
-        
-        # Apply coordinate frame transformation: R_new = R_frame @ R_old
-        # (This transforms the rotation from MVHN frame to template frame)
-        transformed_rot = R_mvhn_to_template_np @ global_orient_rot
+        # Convert 3x3 rotation to 4x4 homogeneous matrix for multiplication
+        global_orient_rot_4x4 = np.eye(4)
+        global_orient_rot_4x4[:3, :3] = global_orient_rot
+        transformed_rot = R_mvhn_to_template @ torch.from_numpy(global_orient_rot_4x4).float()
 
-        # Convert back to axis-angle
-        smplx_params['global_orient'] = R_sci.from_matrix(transformed_rot).as_rotvec()
+        # Convert back to axis-angle (extract 3x3 rotation part)
+        smplx_params['global_orient'] = torch.from_numpy(R_sci.from_matrix(transformed_rot[:3, :3].cpu().numpy()).as_rotvec())
         try:
             output_dict = {
                 # "clean_latent": clean_latents,
