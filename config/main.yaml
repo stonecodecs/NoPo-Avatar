@@ -67,9 +67,9 @@ test:
   save_canonical: false
   save_gaussians: false
   save_lbs_weights: false
-  pose_seq: null
+  pose_seq: /workspace/NoPo-Avatar/smplx_seq
   optim_pose: false
-  metrics_json_path: null
+  metrics_json_path: /workspace/NoPo-Avatar/testmetrics.json
 
 seed: 111123
 

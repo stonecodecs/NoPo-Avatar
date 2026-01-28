@@ -33,7 +33,7 @@ DEBUG = False
 THuman21 = True
 RASTERIZE_LBS_WEIGHTS = False
 
-INPUT_DIR = Path("datasets/thuman")
+INPUT_DIR = Path("/workspace/humanvol/thuman_iclight")
 if THuman21:
     OUTPUT_DIR = Path("/workspace/humanvol/thuman2.1")
 else:
@@ -810,7 +810,7 @@ if __name__ == "__main__":
         print("DRYRUN MODE: No files will be processed or modified")
 
     try:
-        for stage in ("train", "val", "test"):
+        for stage in ("val", "test"): # temp deleted train
             if interrupted_flag.is_set():
                 print(f"\nSkipping remaining stages due to interrupt.")
                 break

@@ -248,6 +248,7 @@ class DatasetTHuman(IterableDataset):
                     context_images = torch.stack([context_images[i] if ref_mask[i] else ic_images[i] for i in range(len(context_indices))])
                     del ic_images
                     # if we ever train on inconsistent POSES, then need a separate 'ic_masks' key for these
+                elif self.cfg.load_inconsistent_images:
 
                 # Skip the example if the images don't have the right shape.
                 context_image_invalid = context_images.shape[1:] != (3, *self.cfg.original_image_shape)
