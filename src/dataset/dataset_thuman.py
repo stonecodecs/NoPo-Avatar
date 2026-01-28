@@ -249,6 +249,7 @@ class DatasetTHuman(IterableDataset):
                     del ic_images
                     # if we ever train on inconsistent POSES, then need a separate 'ic_masks' key for these
                 elif self.cfg.load_inconsistent_images:
+                    print(f"[DEBUG] load_inconsistent_images=True but 'ic_images' not found in example for scene {scene}")
 
                 # Skip the example if the images don't have the right shape.
                 context_image_invalid = context_images.shape[1:] != (3, *self.cfg.original_image_shape)
