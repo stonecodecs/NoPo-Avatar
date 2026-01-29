@@ -134,15 +134,121 @@ def save_as_ply(means, covariances, harmonics, opacities, output_path):
             
     print(f"✓ Saved Standard 3DGS PLY to {output_path}")
 
-def load_and_preprocess_image(image_path: str, target_size: tuple = (1024, 1024)) -> np.ndarray:
+def load_and_preprocess_image_with_mask(
+    image_path: str, 
+    mask_path: str, 
+    target_size: tuple = (1024, 1024),
+    padding_ratio: float = 0.1
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Load and preprocess image and mask together.
+    Crops first based on mask bounding box (ensuring all human pixels are captured),
+    then resizes to target size.
+    
+    Args:
+        image_path: Path to image file
+        mask_path: Path to mask file (or None if mask doesn't exist)
+        target_size: Target output size (width, height)
+        padding_ratio: Padding around bounding box as ratio of bounding box size
+    
+    Returns:
+        Tuple of (image, mask) as numpy arrays in [0, 1] range
+    """
+    # Load image and mask
     img = Image.open(image_path).convert('RGB')
-    img = img.resize(target_size, Image.LANCZOS)
+    if mask_path and Path(mask_path).exists():
+        mask = Image.open(mask_path)
+        if mask.mode != 'L': 
+            mask = mask.convert('L')
+    else:
+        # If no mask, create a full mask (fallback)
+        mask = Image.new('L', img.size, 255)
+    
+    # Ensure mask and image are same size
+    if mask.size != img.size:
+        mask = mask.resize(img.size, Image.NEAREST)
+    
+    # Convert mask to numpy to find bounding box
+    mask_np = np.array(mask)
+    
+    # Find bounding box of human pixels (where mask > threshold)
+    # Use a low threshold to capture all human pixels
+    threshold = 0.01  # Very low threshold to capture all human pixels
+    mask_binary = (mask_np / 255.0) > threshold
+    
+    if not np.any(mask_binary):
+        # No human pixels found, use full image
+        bbox = (0, 0, img.size[0], img.size[1])
+    else:
+        # Find bounding box
+        rows = np.any(mask_binary, axis=1)
+        cols = np.any(mask_binary, axis=0)
+        
+        if not np.any(rows) or not np.any(cols):
+            # Fallback to full image
+            bbox = (0, 0, img.size[0], img.size[1])
+        else:
+            # Find bounding box: first and last True indices
+            top = np.argmax(rows)  # First row with human pixels
+            bottom = len(rows) - np.argmax(rows[::-1])  # Last row + 1 (exclusive for PIL crop)
+            left = np.argmax(cols)  # First column with human pixels
+            right = len(cols) - np.argmax(cols[::-1])  # Last column + 1 (exclusive for PIL crop)
+        
+        # Add padding
+        bbox_width = right - left
+        bbox_height = bottom - top
+        padding_x = int(bbox_width * padding_ratio)
+        padding_y = int(bbox_height * padding_ratio)
+        
+        # Clamp to image boundaries
+        left = max(0, left - padding_x)
+        top = max(0, top - padding_y)
+        right = min(img.size[0], right + padding_x)
+        bottom = min(img.size[1], bottom + padding_y)
+        
+        bbox = (left, top, right, bottom)
+    
+    # Crop both image and mask to bounding box
+    img_cropped = img.crop(bbox)
+    mask_cropped = mask.crop(bbox)
+    
+    # Resize to target size
+    w_out, h_out = target_size
+    img_resized = img_cropped.resize((w_out, h_out), Image.LANCZOS)
+    mask_resized = mask_cropped.resize((w_out, h_out), Image.NEAREST)
+    
+    # Convert to numpy arrays
+    img_array = np.array(img_resized).astype(np.float32) / 255.0
+    mask_array = np.array(mask_resized).astype(np.float32) / 255.0
+    
+    return img_array, mask_array
+
+
+def load_and_preprocess_image(image_path: str, target_size: tuple = (1024, 1024)) -> np.ndarray:
+    """
+    Load and preprocess image (legacy function for backward compatibility).
+    For mask-aware cropping, use load_and_preprocess_image_with_mask instead.
+    """
+    img = Image.open(image_path).convert('RGB')
+    w_in, h_in = img.size
+    w_out, h_out = target_size
+    
+    # Simple resize (no cropping)
+    img = img.resize((w_out, h_out), Image.LANCZOS)
     return np.array(img).astype(np.float32) / 255.0
 
+
 def load_and_preprocess_mask(mask_path: str, target_size: tuple = (1024, 1024)) -> np.ndarray:
+    """
+    Load and preprocess mask (legacy function for backward compatibility).
+    For mask-aware cropping, use load_and_preprocess_image_with_mask instead.
+    """
     mask = Image.open(mask_path)
     if mask.mode != 'L': mask = mask.convert('L')
-    mask = mask.resize(target_size, Image.NEAREST)
+    w_out, h_out = target_size
+    
+    # Simple resize (no cropping)
+    mask = mask.resize((w_out, h_out), Image.NEAREST)
     return np.array(mask).astype(np.float32) / 255.0
 
 def load_template_data(template_size: int = 1024, device: torch.device = None):
@@ -198,13 +304,36 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
     if not masks:
         raise FileNotFoundError(f"No masks found in {mask_dir}")
 
-    # actually load images & masks
+    # Detect reference image (has 'ref' in filename) for ref_mask
+    # ref_mask indicates which view is the reference view for models that use it
+    ref_idx = -1  # -1 means no reference image
+    for idx, f in enumerate(img_files):
+        if 'ref' in f.stem.lower():
+            ref_idx = idx
+            print(f"Detected reference image: {f.name} (index {idx})")
+            break  # Use first occurrence if multiple
+    
+    if ref_idx == -1:
+        print("No reference image detected (no 'ref' in filename). Using all zeros for ref_mask.")
+    
+    # actually load images & masks with mask-aware cropping
+    # This ensures all human pixels are captured by cropping based on mask bounding box first
     images, masks = [], []
     for f in img_files:
-        images.append(load_and_preprocess_image(str(f), image_size))
         m_file = mask_dir / f"{f.stem}.png"
-        if not m_file.exists(): m_file = mask_dir / f"{f.stem}.jpg"
-        masks.append(load_and_preprocess_mask(str(m_file), image_size) if m_file.exists() else np.ones(image_size))
+        if not m_file.exists(): 
+            m_file = mask_dir / f"{f.stem}.jpg"
+        
+        if m_file.exists():
+            # Use mask-aware cropping to ensure all human pixels are captured
+            img, mask = load_and_preprocess_image_with_mask(str(f), str(m_file), image_size)
+            images.append(img)
+            masks.append(mask)
+        else:
+            # Fallback: no mask available, use simple resize
+            print(f"Warning: No mask found for {f.name}, using simple resize")
+            images.append(load_and_preprocess_image(str(f), image_size))
+            masks.append(np.ones(image_size, dtype=np.float32))
 
     # load intrinsics if available
     num_v = len(images)
@@ -306,9 +435,15 @@ def load_data_dir(input_dir: str, image_size: tuple = (1024, 1024), device: torc
             raise ValueError(f"Unsupported SMPLX params file format: {smplx_params_path.suffix}")
     else:
         smplx_params = None
+    
+    # Create ref_mask: [num_views] tensor indicating reference view
+    # Value is 1.0 for reference view, 0.0 for others
+    ref_mask = torch.zeros(num_v, dtype=torch.float32, device=device)
+    if ref_idx >= 0:
+        ref_mask[ref_idx] = 1.0
 
     # can recursively call 'test_dir' to load test views with the same logic above
-    return images, masks, intrinsics, extrinsics, smplx_params, test_dir
+    return images, masks, intrinsics, extrinsics, smplx_params, test_dir, ref_mask
 
 def run_inference(
     input_dir: str,
@@ -340,7 +475,7 @@ def run_inference(
 
     # load image + mask data provided from user (and test/ if provided)
     print(f"Loading data from {input_dir}...")
-    images, masks, intrinsics, extrinsics, smplx_params, test_dir = load_data_dir(input_dir, image_size, device)
+    images, masks, intrinsics, extrinsics, smplx_params, test_dir, ref_mask = load_data_dir(input_dir, image_size, device)
     num_v = len(images) # number of input views
 
     # Initialize Model
@@ -363,6 +498,11 @@ def run_inference(
         'overlap': torch.ones(1, num_v, num_v, device=device),
         'use_smplx': torch.ones(1, num_v, dtype=torch.bool, device=device),
     }
+    
+    # Add ref_mask if model expects it (detected from checkpoint)
+    if hasattr(encoder_cfg.backbone, 'use_ref_mask') and encoder_cfg.backbone.use_ref_mask:
+        context['ref_mask'] = ref_mask.unsqueeze(0)  # Add batch dimension: [1, num_v]
+        print(f"Added ref_mask to context (reference view index: {torch.argmax(ref_mask).item() if ref_mask.sum() > 0 else 'none'})")
 
     # if SMPLX parameters are provided, update context:
     # NOTE: we assume that these smplx_parameters are the same ones to be used for target rendering
@@ -371,7 +511,10 @@ def run_inference(
     
     # Add template data
     if is_template:
-        t_3d, t_lbs, t_mask = load_template_data(1024, device)
+        # Use auto-detected template resolution from checkpoint
+        template_size = encoder_cfg.backbone.template_image_size[0]
+        print(f"Loading template data with resolution {template_size}x{template_size}...")
+        t_3d, t_lbs, t_mask = load_template_data(template_size, device)
         context.update({'template_3d': t_3d, 'template_lbs_weights': t_lbs, 'template_mask': t_mask})
 
     # Apply same preprocessing as main.py
@@ -387,39 +530,55 @@ def run_inference(
     # ! this saves gaussians in canonical average body T-pose
     means = gaussians.means[0].cpu().numpy()
     valid = np.linalg.norm(means, axis=-1) < 1e7
-    np.savez(output_path / 'tpose_gaussians.npz', 
-             means=means[valid], 
-             covariances=gaussians.covariances[0].cpu().numpy()[valid],
-             harmonics=gaussians.harmonics[0].cpu().numpy()[valid],
-             opacities=gaussians.opacities[0].cpu().numpy()[valid])
+    
+    # Prepare save dict with core Gaussian parameters
+    save_dict = {
+        'means': means[valid],
+        'covariances': gaussians.covariances[0].cpu().numpy()[valid],
+        'harmonics': gaussians.harmonics[0].cpu().numpy()[valid],
+        'opacities': gaussians.opacities[0].cpu().numpy()[valid],
+    }
+    
+    # Save LBS weights if available (needed for animation)
+    if gaussians.lbs_weights is not None:
+        save_dict['lbs_weights'] = gaussians.lbs_weights[0].cpu().numpy()[valid]
+    if gaussians.lbs_weights_bones is not None:
+        save_dict['lbs_weights_bones'] = gaussians.lbs_weights_bones[0].cpu().numpy()[valid]
+    if gaussians.idx is not None:
+        save_dict['idx'] = gaussians.idx[0].cpu().numpy()[valid]
+    
+    np.savez(output_path / 'tpose_gaussians.npz', **save_dict)
              
     print(f"✓ Success! Output saved to {output_dir}/tpose_gaussians.npz")
+    if gaussians.lbs_weights is not None:
+        print(f"  ✓ Saved LBS weights for animation")
 
-    # * PLY export that uses smplx 'betas' to warp the template body to subject identity
-    # curr_cnl_Rs = context['cnl_Rs'][:, 0].clone().detach().to(device)
-    # curr_cnl_Ts = context['cnl_Ts'][:, 0].clone().detach().to(device)
-    shaped_means, shaped_covs = apply_lbs_to_gaussians(
-        gaussians.means,
-        gaussians.covariances,
-        context['cnl_Rs'][:,0].clone().detach().to(device),
-        context['cnl_Ts'][:,0].clone().detach().to(device),
-        F.softmax(gaussians.lbs_weights_bones, dim=-1) # Shape-specific weights
-    )
+    if smplx_params is not None:
+        # * PLY export that uses smplx 'betas' to warp the template body to subject identity
+        # curr_cnl_Rs = context['cnl_Rs'][:, 0].clone().detach().to(device)
+        # curr_cnl_Ts = context['cnl_Ts'][:, 0].clone().detach().to(device)
+        shaped_means, shaped_covs = apply_lbs_to_gaussians(
+            gaussians.means,
+            gaussians.covariances,
+            context['cnl_Rs'][:,0].clone().detach().to(device),
+            context['cnl_Ts'][:,0].clone().detach().to(device),
+            F.softmax(gaussians.lbs_weights_bones, dim=-1) # Shape-specific weights
+        )
 
-    save_as_ply(
-        shaped_means[0][valid], 
-        shaped_covs[0][valid], 
-        gaussians.harmonics[0][valid], 
-        gaussians.opacities[0][valid], 
-        output_path / 'gaussians.ply'
-    )
+        save_as_ply(
+            shaped_means[0][valid], 
+            shaped_covs[0][valid], 
+            gaussians.harmonics[0][valid], 
+            gaussians.opacities[0][valid], 
+            output_path / 'gaussians.ply'
+        )
 
-    print(f"✓ Success! PLY saved to {output_dir}/gaussians.ply")
+        print(f"✓ Success! PLY saved to {output_dir}/gaussians.ply")
 
     # render test views if provided
     if render and test_dir:
         # this overwrites smplx params with the test views (but these are essentially the same.)
-        test_images, test_masks, test_intrinsics, test_extrinsics, smplx_params, _ = load_data_dir(test_dir, image_size, device)
+        test_images, test_masks, test_intrinsics, test_extrinsics, smplx_params, _, test_ref_mask = load_data_dir(test_dir, image_size, device)
         assert test_intrinsics is not None
         assert test_extrinsics is not None
 
@@ -565,28 +724,89 @@ def get_cfg(config_path: str):
     return full_cfg
 
 def update_cfg_with_defaults(encoder_cfg, state_dict: dict, image_size: tuple = (1024, 1024)):
-    # update token count depending on config settings
-        # original config overrides
+    """Auto-detect configuration from checkpoint to ensure compatibility."""
+    print("Auto-detecting configuration from checkpoint...")
+    
+    # Detect encoder type
     is_template = any('template' in k for k in state_dict.keys())
     encoder_cfg.name = 'template_uv_concat_bone' if is_template else 'noposplat'
+    print(f"  Encoder type: {encoder_cfg.name}")
 
-    # update token count depending on config settings
-    token_count = state_dict.get('encoder.backbone.template_embed', torch.zeros(4096)).shape[0]
+    # Auto-detect template resolution from template_embed size
+    template_embed_key = 'encoder.backbone.template_embed'
+    if template_embed_key in state_dict:
+        token_count = state_dict[template_embed_key].shape[0]
+        # token_count = H * W where H, W are template resolution / patch_size
+        # Assuming square template and patch_size=16
+        patch_size = 16
+        tokens_per_side = int(np.sqrt(token_count))
+        template_res = tokens_per_side * patch_size
+        
+        encoder_cfg.backbone.template_image_size = [template_res, template_res]
+        print(f"  Template resolution: {template_res}x{template_res} ({token_count} tokens)")
+    else:
+        # Fallback to provided image_size
+        encoder_cfg.backbone.template_image_size = [image_size[0], image_size[1]]
+        print(f"  Template resolution: {image_size[0]}x{image_size[1]} (from argument)")
+    
+    # Auto-detect input channels from patch_embed
+    patch_embed_key = 'encoder.backbone.patch_embed.proj.weight'
+    if patch_embed_key in state_dict:
+        in_channels = state_dict[patch_embed_key].shape[1]
+        print(f"  Input channels: {in_channels}")
+        
+        # Determine if mask is concatenated as input
+        if in_channels == 4:
+            # RGB + mask concatenated
+            if hasattr(encoder_cfg.backbone, 'use_ref_mask'):
+                encoder_cfg.backbone.use_ref_mask = True
+            else:
+                # For backwards compatibility with older configs
+                setattr(encoder_cfg.backbone, 'use_ref_mask', True)
+            print(f"    -> Using concatenated mask input (RGB + mask)")
+        elif in_channels == 3:
+            # RGB only
+            if hasattr(encoder_cfg.backbone, 'use_ref_mask'):
+                encoder_cfg.backbone.use_ref_mask = False
+            else:
+                setattr(encoder_cfg.backbone, 'use_ref_mask', False)
+            print(f"    -> RGB input only")
+        else:
+            print(f"    -> Warning: Unexpected input channels: {in_channels}")
+            if hasattr(encoder_cfg.backbone, 'use_ref_mask'):
+                encoder_cfg.backbone.use_ref_mask = False
+            else:
+                setattr(encoder_cfg.backbone, 'use_ref_mask', False)
+    
+    # Disable intrinsics embedding (not used in inference)
     embed_loc = 'none'
     encoder_cfg.intrinsics_embed_loc = embed_loc
     encoder_cfg.backbone.intrinsics_embed_loc = embed_loc
     encoder_cfg.backbone.intrinsics_embed_type = 'none'
-    encoder_cfg.backbone.template_image_size = [image_size[0], image_size[1]]
+    
+    # Standard inference settings
     encoder_cfg.debug = False
-    encoder_cfg.input_mean = [0.5,0.5,0.5]
-    encoder_cfg.input_std = [0.5,0.5,0.5]
+    encoder_cfg.input_mean = [0.5, 0.5, 0.5]
+    encoder_cfg.input_std = [0.5, 0.5, 0.5]
     encoder_cfg.highres_uv = False
-    if not hasattr(encoder_cfg, 'debug'): encoder_cfg.debug = False
-    if not hasattr(encoder_cfg, 'separate_xyz_head'): encoder_cfg.separate_xyz_head = False
-    if not hasattr(encoder_cfg, 'pretrained_template_reinit'): encoder_cfg.pretrained_template_reinit = False
-    encoder_cfg.backbone.template_image_size = [image_size[0], image_size[1]]
+    
+    # Set optional attributes with defaults
+    if not hasattr(encoder_cfg, 'debug'): 
+        encoder_cfg.debug = False
+    if not hasattr(encoder_cfg, 'separate_xyz_head'): 
+        encoder_cfg.separate_xyz_head = False
+    if not hasattr(encoder_cfg, 'pretrained_template_reinit'): 
+        encoder_cfg.pretrained_template_reinit = False
+    if not hasattr(encoder_cfg.backbone, 'use_ref_mask'):
+        encoder_cfg.backbone.use_ref_mask = False
+    
+    # Detect confidence head
     conf_key = 'encoder.downstream_head1_template.dpt.head.4.weight'
     encoder_cfg.has_conf = (state_dict[conf_key].shape[0] == 4) if conf_key in state_dict else False
+    if encoder_cfg.has_conf:
+        print(f"  Confidence prediction: enabled")
+    
+    print("✓ Configuration auto-detection complete")
     return encoder_cfg
 
 
