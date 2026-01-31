@@ -33,7 +33,7 @@ DEBUG = False
 THuman21 = True
 RASTERIZE_LBS_WEIGHTS = False
 
-INPUT_DIR = Path("/workspace/humanvol/thuman_iclight")
+INPUT_DIR = Path("/workspace/humanvol/thuman") # assuming we already have this
 if THuman21:
     OUTPUT_DIR = Path("/workspace/humanvol/thuman2.1")
 else:
@@ -1025,6 +1025,10 @@ if __name__ == "__main__":
             
             # Save updated index
             if not interrupted_flag.is_set():
+                # create index_path file if doesn't exist already
+                if not index_path.exists():
+                    index_path.touch()
+                # then write to it
                 with index_path.open("w") as f:
                     json.dump(final_index, f, indent=2)
                 print(f"Index updated: {len(final_index)} total entries\n")
