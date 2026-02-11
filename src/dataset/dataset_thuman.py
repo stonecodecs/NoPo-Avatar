@@ -221,7 +221,16 @@ class DatasetTHuman(IterableDataset):
                 context_masks = [
                     example["masks"][index.item()] for index in context_indices
                 ]
+
                 context_masks = self.convert_masks(context_masks)
+                
+                context_face_bboxes = []
+                if "face_bbox" in example:
+                    context_face_bboxes = [example["face_bbox"][index.item()] for index in context_indices]
+
+                context_face_confs = []
+                if "face_conf" in example:
+                    context_face_confs = [example["face_conf"][index.item()] for index in context_indices]
 
                 # NOTE: 'target' images in this case refer to novel views not used as context
                 # but still influences the loss
@@ -233,6 +242,15 @@ class DatasetTHuman(IterableDataset):
                     example["masks"][index.item()] for index in target_indices
                 ] 
                 target_masks = self.convert_masks(target_masks)
+
+                target_face_bboxes = []
+                if "face_bbox" in example:
+                    target_face_bboxes = [example["face_bbox"][index.item()] for index in target_indices]
+
+                target_face_confs = []
+                if "face_conf" in example:
+                    target_face_confs = [example["face_conf"][index.item()] for index in target_indices]
+
 
                 ref_mask = torch.zeros(len(context_indices), dtype=torch.bool)
                 ref_mask[torch.randint(0, len(context_indices), [1])] = True
@@ -311,6 +329,8 @@ class DatasetTHuman(IterableDataset):
                         "overlap": overlap,
                         "use_smplx": True,
                         "ref_mask": ref_mask,
+                        "face_bbox": context_face_bboxes,
+                        "face_conf": context_face_confs,
                         # "canonical_vertices": example["canonical_vertex"],
                         # "canonical_lbs_weights": example["canonical_lbs_weights"],
                     },
@@ -331,6 +351,8 @@ class DatasetTHuman(IterableDataset):
                         "index": target_indices,
                         "use_smplx": True,
                         "ref_mask": ref_mask, # redundant and can remove, but why not
+                        "face_bbox": target_face_bboxes,
+                        "face_conf": target_face_confs,
                     },
                     "scene": scene,
                     "bgcolor": bgcolor,
