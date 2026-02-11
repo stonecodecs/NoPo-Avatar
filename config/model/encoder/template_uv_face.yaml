@@ -1,0 +1,59 @@
+defaults:
+  - backbone: croco_multi2
+
+name: template_uv_face
+
+opacity_mapping:
+  initial: 0.0
+  final: 0.0
+  warm_up: 1
+
+num_monocular_samples: 32
+num_surfaces: 1
+predict_opacity: false
+
+gaussians_per_pixel: 1
+
+gaussian_adapter:
+  gaussian_scale_min: 0.5
+  gaussian_scale_max: 15.0
+  sh_degree: 4
+
+d_feature: 128
+
+visualizer:
+  num_samples: 8
+  min_resolution: 256
+  export_ply: false
+
+apply_bounds_shim: true
+
+pts3d_head_type: dpt
+pts3d_head_skip: false
+gs_params_head_type: dpt_gs
+pose_free: true
+pretrained_weights: "pretrained_weights/mixRe10kDl3dv_512x512.ckpt"
+pretrained_template_reinit: false
+gs_params_head_upsample_type: "deconv"
+
+apply_mask: "hard"
+direct_rgbs: false
+
+pts3d_for_lbs_weights: false
+
+separate_xyz_head: false
+n_hooks: 4
+
+postprocess: false
+
+# DINOv2 FPN for face crops. resolution must be divisible by 14.
+# For res256: use 224 (matches get_face_features RoIAlign; 448 would 4x tokens).
+# out_dim: 256 = lighter (combined_dim=1024); 768 = match backbone (combined_dim=1536).
+face_encoder_cfg:
+  name: dino_v2_fpn
+  dino_model_name: dinov2_vitl14_reg
+  out_dim: 256
+  resolution: 224
+  freeze: true
+  use_esrgan: false
+  esrgan_model_path: null
