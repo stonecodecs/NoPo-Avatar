@@ -38,6 +38,7 @@ if THuman21:
     OUTPUT_DIR = Path("/workspace/humanvol/thuman2.1")
 else:
     OUTPUT_DIR = Path("/workspace/humanvol/thuman2.0")
+FACE_CROP_JSON = Path("/workspace/humanvol/thuman/thuman_face_bboxes_val.json")
 
 TRAIN_FRAME_ORDERS = []
 for i in range(16):
@@ -314,6 +315,9 @@ class Metadata(TypedDict):
 class Example(Metadata):
     key: str
     images: list[UInt8[Tensor, "..."]]
+    # Optional: per-view face bbox [x1,y1,x2,y2] and confidence (from thuman_face_bboxes.json)
+    face_bbox: Optional[Float[Tensor, "view 4"]]
+    face_confidence: Optional[Float[Tensor, "view"]]
 
 
 def load_metadata(camera_path: Path, canonical_path: Path, pose_path: Path, scene_name, split) -> Metadata:
@@ -409,7 +413,7 @@ def load_metadata(camera_path: Path, canonical_path: Path, pose_path: Path, scen
     }
 
 
-def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool, output_dir: Path):
+def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool, output_dir: Path, face_bboxes: Optional[dict]):
     """Process a single key and return the example."""
     try:
         image_dir = path / key / "images"
@@ -437,7 +441,25 @@ def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool
         example["masks"] = [masks[image_name] for image_name in image_names]
         if pack_inconsistent:
             example["ic_images"] = [ic_images[image_name] for image_name in image_names]
-        
+
+        if face_bboxes is not None:
+            try:
+                face_detect_info = face_bboxes[key] # bbox, confidence scores, H,W
+                bboxes = []
+                confs = []
+                for timestamp in example["timestamps"]:
+                    padded_ts = f"{timestamp:06d}"
+                    bboxes.append(face_detect_info[padded_ts]["bbox"])
+                    confs.append(face_detect_info[padded_ts]["confidence"])
+            except KeyError: # if none for the subject/key at all, return None
+                example["face_bbox"] = None
+                example["face_conf"] = None
+                return example, num_bytes, None
+
+            bboxes = [b if b is not None else [0., 0., 0., 0.] for b in bboxes]
+            example["face_bbox"] = torch.tensor(bboxes)
+            example["face_conf"] = torch.tensor(confs)
+
         # Explicitly delete the large dictionaries to free memory immediately
         del images
         del masks
@@ -457,7 +479,7 @@ def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool
 
 def worker_process(worker_id: int, keys_queue: Queue, chunk_counter: Value, counter_lock: Lock,
                    stage: str, path: Path, pack_inconsistent: bool, output_dir: Path, 
-                   target_bytes: int, progress_queue: Queue):
+                   target_bytes: int, progress_queue: Queue, face_bboxes: Optional[dict] = None):
     """Worker process that processes keys and saves chunks."""
     
     chunk_size = 0
@@ -502,7 +524,7 @@ def worker_process(worker_id: int, keys_queue: Queue, chunk_counter: Value, coun
             if key is None:  # Poison pill
                 break
                 
-            example, num_bytes, error = process_single_key(key, path, stage, pack_inconsistent, output_dir)
+            example, num_bytes, error = process_single_key(key, path, stage, pack_inconsistent, output_dir, face_bboxes)
             
             if error:
                 progress_queue.put(('error', worker_id, key, error))
@@ -773,6 +795,8 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--ic", action="store_true")
+    parser.add_argument("--face-bboxes", type=str, default="/workspace/humanvol/thuman/thuman_face_bboxes.json",
+                        help="Path to thuman_face_bboxes.json (scene_id -> frame_000000 -> bbox, confidence). Adds face_bbox and face_confidence to each example.")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--custom-json", type=str, default=None)
     parser.add_argument("--limit", type=int, default=None)
@@ -810,7 +834,7 @@ if __name__ == "__main__":
         print("DRYRUN MODE: No files will be processed or modified")
 
     try:
-        for stage in ("val", "test"): # temp deleted train
+        for stage in ("train", "val"): # temp deleted train
             if interrupted_flag.is_set():
                 print(f"\nSkipping remaining stages due to interrupt.")
                 break
@@ -928,6 +952,17 @@ if __name__ == "__main__":
                 print_dryrun_summary(categories, stage, OUTPUT_DIR)
                 continue  # Skip to next stage
 
+            # Load face bboxes JSON if requested (for train split; keys must match scene ids)
+            face_bboxes = None
+            if args.face_bboxes and stage == "train":
+                face_bbox_path = Path(args.face_bboxes)
+                if face_bbox_path.exists():
+                    with open(face_bbox_path) as f:
+                        face_bboxes = json.load(f)
+                    print(f"Loaded face bboxes for {len(face_bboxes)} scenes from {face_bbox_path}")
+                else:
+                    print(f"Warning: --face-bboxes file not found: {face_bbox_path}, skipping face bbox enrichment")
+
             # Set up multiprocessing
             mp.set_start_method('spawn', force=True)
             
@@ -956,7 +991,7 @@ if __name__ == "__main__":
                         target=worker_process,
                         args=(worker_id, keys_queue, chunk_counter, counter_lock,
                               stage, path, pack_inconsistent, OUTPUT_DIR,
-                              TARGET_BYTES_PER_CHUNK, progress_queue)
+                              TARGET_BYTES_PER_CHUNK, progress_queue, face_bboxes)
                     )
                     p.start()
                     stage_workers.append(p)

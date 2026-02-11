@@ -10,6 +10,9 @@ from .dataset.data_module import DataLoaderCfg
 from .loss import LossCfgWrapper
 from .model.decoder import DecoderCfg
 from .model.encoder import EncoderCfg
+from .model.encoder.encoder_noposplat import EncoderNoPoSplatCfg
+from .model.encoder.encoder_template_uv_concat_bone import EncoderLBSNoPoSplatCfg
+from .model.encoder.encoder_template_uv_face import EncoderLBSNoPoSplatFaceCfg
 from .model.model_wrapper import OptimizerCfg, TestCfg, TrainCfg
 
 
@@ -56,6 +59,26 @@ TYPE_HOOKS = {
     Path: Path,
 }
 
+# Map encoder name -> concrete config class so dacite can build encoder union
+ENCODER_CFG_TYPES = {
+    "noposplat": EncoderNoPoSplatCfg,
+    "noposplat_multi": EncoderNoPoSplatCfg,
+    "template_uv_concat_bone": EncoderLBSNoPoSplatCfg,
+    "template_uv_face": EncoderLBSNoPoSplatFaceCfg,
+}
+
+
+def _encoder_cfg_from_dict(data: dict) -> EncoderCfg:
+    """Build the correct encoder config by name so the union matches. Dacite calls type hooks with (data) only."""
+    name = data.get("name")
+    if name not in ENCODER_CFG_TYPES:
+        raise ValueError(f"Unknown model.encoder name: {name!r}. Expected one of {list(ENCODER_CFG_TYPES)}")
+    return from_dict(
+        ENCODER_CFG_TYPES[name],
+        data,
+        config=Config(type_hooks=TYPE_HOOKS),
+    )
+
 
 T = TypeVar("T")
 
@@ -100,6 +123,9 @@ def load_typed_root_config(cfg: DictConfig) -> RootCfg:
     return load_typed_config(
         cfg,
         RootCfg,
-        {list[LossCfgWrapper]: separate_loss_cfg_wrappers,
-         list[DatasetCfgWrapper]: separate_dataset_cfg_wrappers},
+        {
+            list[LossCfgWrapper]: separate_loss_cfg_wrappers,
+            list[DatasetCfgWrapper]: separate_dataset_cfg_wrappers,
+            EncoderCfg: _encoder_cfg_from_dict,
+        },
     )

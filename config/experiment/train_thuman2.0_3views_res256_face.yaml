@@ -16,7 +16,7 @@ model:
     pose_free: true
     intrinsics_embed_loc: encoder
     intrinsics_embed_type: token
-    pretrained_weights: './pretrained_weights/mixRe10kDl3dv_512x512.ckpt'
+    pretrained_weights: ""
 
     apply_mask: "soft"
     direct_rgbs: false

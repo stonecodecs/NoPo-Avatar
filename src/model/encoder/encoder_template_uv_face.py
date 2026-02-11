@@ -55,7 +55,7 @@ class EncoderLBSNoPoSplatFaceCfg:
     gs_params_head_type: str
     input_mean: list[float] = (0.5, 0.5, 0.5)
     input_std: list[float] = (0.5, 0.5, 0.5)
-    pretrained_weights: str = ""
+    pretrained_weights: Optional[str] = ""
     pretrained_template_reinit: bool = False
     pose_free: bool = True
     apply_mask: str = "none"
@@ -155,7 +155,7 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
         Get features from the face encoder.
         """
         device = images.device
-        B, V, C, H, W = images.shape
+        V, C, H, W = images.shape
         
         images_flat = rearrange(images, "b v c h w -> (b v) c h w")
         bboxes_flat = rearrange(face_bboxes, "b v c -> (b v) c")
