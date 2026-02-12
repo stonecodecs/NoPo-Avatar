@@ -15,7 +15,7 @@ from lightning.pytorch.plugins.environments import SLURMEnvironment
 from omegaconf import DictConfig, OmegaConf
 import torch.nn.functional as F
 
-from src.misc.weight_modify import checkpoint_filter_fn
+from src.misc.weight_modify import checkpoint_filter_fn, adapt_input_conv, resample_patch_embed
 from src.model.distiller import get_distiller
 
 # Configure beartype and jaxtyping.
@@ -162,10 +162,30 @@ def train(cfg_dict: DictConfig):
                             value_grid = F.interpolate(value_grid, size=(new_size, new_size), mode="bilinear")
                             value_grid = value_grid.reshape(-1, new_size * new_size).transpose(1, 0)
                             new_ckpt_weights[key] = torch.cat([value_grid, value[-1:]], dim=0)
-                    print("mismatched shape of {}: current is {} and in checkpoint it is {}".format(key,
-                                                                                                    current_state_dict[
-                                                                                                        key].shape,
-                                                                                                    value.shape))
+                    elif key == "backbone.patch_embed.proj.weight":
+                        # Adapt channel count (e.g. 3 -> 4) and/or spatial size like checkpoint_filter_fn
+                        O, I, H, W = encoder.backbone.patch_embed.proj.weight.shape
+                        v = value
+                        if len(v.shape) < 4:
+                            v = v.reshape(O, -1, H, W)
+                        if v.shape[-2] != H or v.shape[-1] != W:
+                            v = resample_patch_embed(v, (H, W), interpolation="bicubic", antialias=True)
+                        if v.shape[1] != I:
+                            v = adapt_input_conv(I, v)
+                        new_ckpt_weights[key] = v
+                    elif "act_postprocess" in key and value.dim() == 4:
+                        # Image-branch DPT act_postprocess: checkpoint 768-d, model 1024-d (combined_dim). Zero-pad.
+                        cur = current_state_dict[key]
+                        if cur.shape[0] == value.shape[0] and value.shape[1] == 768 and cur.shape[1] == 1024 and value.shape[2:] == cur.shape[2:]:
+                            v = torch.zeros_like(cur, dtype=value.dtype, device=value.device)
+                            v[:, :768, :, :] = value
+                            new_ckpt_weights[key] = v
+                        else:
+                            print("mismatched shape of {}: current is {} and in checkpoint it is {}".format(key, cur.shape, value.shape))
+                    else:
+                        print("mismatched shape of {}: current is {} and in checkpoint it is {}".format(key,
+                                                                                                        current_state_dict[key].shape,
+                                                                                                        value.shape))
             missing_keys, unexpected_keys = encoder.load_state_dict(new_ckpt_weights, strict=False)
         else:
             raise ValueError(f"Invalid checkpoint format: {weight_path}")

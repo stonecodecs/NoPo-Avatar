@@ -16,7 +16,7 @@ model:
     pose_free: true
     intrinsics_embed_loc: encoder
     intrinsics_embed_type: token
-    pretrained_weights: 'checkpoint/thuman2.0_inputs3_res1024_iter50000.ckpt'
+    pretrained_weights: 'checkpoint/thuman2.1_inputs3_res1024_iter50000.ckpt'
 
     apply_mask: "soft"
     direct_rgbs: false
