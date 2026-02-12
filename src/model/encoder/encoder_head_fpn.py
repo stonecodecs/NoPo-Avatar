@@ -75,7 +75,7 @@ class DPTHead(nn.Module):
             x = self.projects[i](x)
             out.append(x)
 
-        fusion_feats = torch.cat(out, dim=1)
+        fusion_feats = torch.cat(out, dim=1) # these are each (B,1024,16,16)
         fusion_feats = self.output_conv(fusion_feats)
 
         return fusion_feats
@@ -203,7 +203,7 @@ class EncoderHeadDINOv2FPN(nn.Module):
         patch_w = image.shape[-1] // patch_size
         features = self.dino_model.get_intermediate_layers(
             image, self.intermediate_layer_idx, return_class_token=True
-        )
+        ) # returns tuple of 
         out_local = self.fusion_head(features, patch_h, patch_w)
         out_global = None
         if out_global is not None:

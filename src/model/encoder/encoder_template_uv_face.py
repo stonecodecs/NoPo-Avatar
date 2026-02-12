@@ -153,12 +153,19 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
     def get_face_features(self, images, face_bboxes, target_res=224):
         """
         Get features from the face encoder.
+        NOTE: face_bboxes can be empty list, where we return fully zero feature maps.
         """
         device = images.device
-        V, C, H, W = images.shape
+        B, V, C, H, W = images.shape
         
         images_flat = rearrange(images, "b v c h w -> (b v) c h w")
-        bboxes_flat = rearrange(face_bboxes, "b v c -> (b v) c")
+        if len(face_bboxes) > 0:
+            bboxes_flat = rearrange(face_bboxes, "b v c -> (b v) c")
+        else:
+            bboxes_flat = torch.zeros((B*V, 4), device=device)
+            # this forces is_valid to be all false
+            # later, from valid_mask, it will return the 0-tensor
+            # this should make DDP happier rather than returning a zero tensor conditionally
         
         # 1. get valid detections (bboxes not 0-vector or out of image)
         widths = bboxes_flat[:, 2] - bboxes_flat[:, 0]
@@ -201,15 +208,14 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
         
         # 5. Run Encoder (ALWAYS RUNS, keeping DDP happy)
         with torch.no_grad():
-            dino_out = self.face_encoder(crops)
+            dino_out = self.face_encoder(crops) # returns (BV, 256, 256)?
+        dino_out = rearrange(dino_out, "(b v) l c -> b v l c", b=B, v=V)
             
         # 6. Masking
         # Zero out the features from the dummy boxes so they act like "Empty Signals"
-        valid_mask = is_valid.float().view(-1, 1, 1) 
+        valid_mask = is_valid.float().view(1,-1, 1, 1) 
         dino_out = dino_out * valid_mask
-        
-        dino_out = rearrange(dino_out, "(b v) l c -> b v l c", b=B, v=V)
-        return dino_out
+        return dino_out # (B,V,256,256)
 
     def set_mean_head(self, output_mode, head_type, landscape_only, depth_mode, conf_mode, skip,
                       image_branch_backbone=None):
@@ -501,17 +507,19 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
 
         croco_feats = dec_feat[-1]  # (B, V, L, C_croco)
         dec_feat_for_image = list(dec_feat)  # default; replaced when fusing DINO
+        # this is [B,3,(HW)_patch, C_croco=768]
 
         # new face encoder step
         if self.face_encoder is not None:
             face_bboxes = context["face_bbox"]
-            images_flat = rearrange(context["image"], "b v c h w -> (b v) c h w")
-            if images_flat.max() > 1.0 or images_flat.min() < 0.0:
-                images_flat = (images_flat + 1.0) / 2.0
-            images_flat = images_flat.clamp(0.0, 1.0)
+            images = context["image"] # (B,V,C=3,H,W)
+            if images.max() > 1.0 or images.min() < 0.0:
+                images = (images + 1.0) / 2.0
+            images = images.clamp(0.0, 1.0)
             with torch.no_grad():
-                dino_out = self.get_face_features(images_flat, face_bboxes) # (B*V, N_dino, C_dino)
-            dino_feats = rearrange(dino_out, "(b v) l c -> b v l c", b=b, v=v)
+                dino_out = self.get_face_features(images, face_bboxes) # (B*V, N_dino, C_dino)
+            dino_feats = dino_out
+            # dino_feats = rearrange(dino_out, "(b v) l c -> b v l c", b=b, v=v)
 
             n_patches_croco = croco_feats.shape[2]
             side_croco = int(round(n_patches_croco ** 0.5))
@@ -531,9 +539,12 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
                 dino_resized, "(b v) c h w -> b v (h w) c", b=b, v=v
             ).contiguous()
 
-            fused_feats = torch.cat([croco_feats.float(), dino_aligned.float()], dim=-1)
-            dec_feat_for_image = [
-                self._dec_to_combined_proj(tok.float()) for tok in dec_feat[:-1]
+            fused_feats = torch.cat([croco_feats.float(), dino_aligned.float()], dim=-1) # 768(C_croco) + 256(C_dino) = 1024(C_fused)
+            # dec_feat[-1][0] is in the encoder dim, so we want to project to decoder dim
+            first_dec_feat = self.backbone.decoder_embed(dec_feat[0:1][0])
+
+            dec_feat_for_image = [self._dec_to_combined_proj(first_dec_feat.float())] + [
+                self._dec_to_combined_proj(tok.float()) for tok in dec_feat[1:-1]
             ] + [fused_feats]
 
         with torch.amp.autocast('cuda', enabled=False):

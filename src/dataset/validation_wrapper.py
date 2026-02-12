@@ -20,6 +20,7 @@ class ValidationWrapper(Dataset):
         self.dataset_iterator = None
 
     def __len__(self):
+
         return self.length
 
     def __getitem__(self, index: int):
