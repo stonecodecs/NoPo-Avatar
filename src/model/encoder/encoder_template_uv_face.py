@@ -213,7 +213,7 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
             
         # 6. Masking
         # Zero out the features from the dummy boxes so they act like "Empty Signals"
-        valid_mask = is_valid.float().view(1,-1, 1, 1) 
+        valid_mask = is_valid.float().view(B,V,1,1) 
         dino_out = dino_out * valid_mask
         return dino_out # (B,V,256,256)
 
