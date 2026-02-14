@@ -251,6 +251,16 @@ class DatasetTHuman(IterableDataset):
                 if "face_conf" in example:
                     target_face_confs = [example["face_conf"][index.item()] for index in target_indices]
 
+                # arcface embedding per view
+                context_arcface_embeddings = []
+                if "arcface_embedding" in example and example["arcface_embedding"] is not None: # need these for context view supervision
+                    context_arcface_embeddings = [example["arcface_embedding"][index.item()] for index in context_indices]
+                    context_arcface_embeddings = torch.stack(context_arcface_embeddings)
+
+                target_arcface_embeddings = []
+                if "arcface_embedding" in example and example["arcface_embedding"] is not None: # need for target view supervision
+                    target_arcface_embeddings = [example["arcface_embedding"][index.item()] for index in target_indices]
+                    target_arcface_embeddings = torch.stack(target_arcface_embeddings)
 
                 ref_mask = torch.zeros(len(context_indices), dtype=torch.bool)
                 ref_mask[torch.randint(0, len(context_indices), [1])] = True
@@ -331,6 +341,7 @@ class DatasetTHuman(IterableDataset):
                         "ref_mask": ref_mask,
                         "face_bbox": context_face_bboxes,
                         "face_conf": context_face_confs,
+                        "arcface_embedding": context_arcface_embeddings, # training only (V,512)
                         # "canonical_vertices": example["canonical_vertex"],
                         # "canonical_lbs_weights": example["canonical_lbs_weights"],
                     },
@@ -353,6 +364,7 @@ class DatasetTHuman(IterableDataset):
                         "ref_mask": ref_mask, # redundant and can remove, but why not
                         "face_bbox": target_face_bboxes,
                         "face_conf": target_face_confs,
+                        "arcface_mean_embedding": target_arcface_embeddings, # for training only! (V,512)
                     },
                     "scene": scene,
                     "bgcolor": bgcolor,

@@ -9,6 +9,7 @@ from .loss_projection import LossProjection, LossProjectionCfgWrapper
 from .loss_projection2 import LossProjection2, LossProjection2CfgWrapper
 from .loss_pts3d import LossPts3D, LossPts3DCfgWrapper
 from .loss_chamfer2d import LossChamfer2D, LossChamfer2DCfgWrapper
+from .loss_face import LossFace, LossFaceCfgWrapper
 
 LOSSES = {
     LossDepthCfgWrapper: LossDepth,
@@ -21,11 +22,12 @@ LOSSES = {
     LossProjection2CfgWrapper: LossProjection2,
     LossPts3DCfgWrapper: LossPts3D,
     LossChamfer2DCfgWrapper: LossChamfer2D,
+    LossFaceCfgWrapper: LossFace,
 }
 
 LossCfgWrapper = LossDepthCfgWrapper | LossLpipsCfgWrapper | LossMseCfgWrapper | LossLBSWeightsCfgWrapper \
                  | LossChamferCfgWrapper | LossProjectionCfgWrapper | LossProjection2CfgWrapper | LossPts3DCfgWrapper \
-                 | LossChamfer2DCfgWrapper | LossSsimCfgWrapper
+                 | LossChamfer2DCfgWrapper | LossSsimCfgWrapper | LossFaceCfgWrapper
 
 
 def get_losses(cfgs: list[LossCfgWrapper]) -> list[Loss]:

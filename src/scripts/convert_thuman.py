@@ -39,6 +39,8 @@ if THuman21:
 else:
     OUTPUT_DIR = Path("/workspace/humanvol/thuman2.0")
 FACE_CROP_JSON = Path("/workspace/humanvol/thuman/thuman_face_bboxes_val.json")
+# ArcFace NPY base path: we load {base}_train.npy and {base}_val.npy (from thuman_arcface_embeddings.py)
+ARCFACE_NPY_BASE = "/workspace/humanvol/thuman/thuman_arcface_embeddings"
 
 TRAIN_FRAME_ORDERS = []
 for i in range(16):
@@ -318,6 +320,10 @@ class Example(Metadata):
     # Optional: per-view face bbox [x1,y1,x2,y2] and confidence (from thuman_face_bboxes.json)
     face_bbox: Optional[Float[Tensor, "view 4"]]
     face_confidence: Optional[Float[Tensor, "view"]]
+    # Optional: ArcFace embeddings (from thuman_arcface_embeddings.py NPY: per-view, subject mean, subject median)
+    arcface_embedding: Optional[Float[Tensor, "view embedding_dim"]]
+    arcface_mean_embedding: Optional[Float[Tensor, "embedding_dim"]]
+    arcface_median_embedding: Optional[Float[Tensor, "embedding_dim"]]
 
 
 def load_metadata(camera_path: Path, canonical_path: Path, pose_path: Path, scene_name, split) -> Metadata:
@@ -413,7 +419,7 @@ def load_metadata(camera_path: Path, canonical_path: Path, pose_path: Path, scen
     }
 
 
-def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool, output_dir: Path, face_bboxes: Optional[dict]):
+def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool, output_dir: Path, face_bboxes: Optional[dict], arcface_data: Optional[dict] = None):
     """Process a single key and return the example."""
     try:
         image_dir = path / key / "images"
@@ -454,11 +460,38 @@ def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool
             except KeyError: # if none for the subject/key at all, return None
                 example["face_bbox"] = None
                 example["face_conf"] = None
+                example["arcface_embedding"] = None
+                example["arcface_mean_embedding"] = None
                 return example, num_bytes, None
 
             bboxes = [b if b is not None else [0., 0., 0., 0.] for b in bboxes]
             example["face_bbox"] = torch.tensor(bboxes)
             example["face_conf"] = torch.tensor(confs)
+
+        # ArcFace embeddings (from thuman_arcface_embeddings.py NPY: subject -> frames, mean_embedding, median_embedding)
+        if arcface_data is not None and key in arcface_data:
+            subj = arcface_data[key]
+            frames = subj.get("frames", {})
+            mean_emb = subj.get("mean_embedding")
+            emb_list = []
+            for ts in example["timestamps"]:
+                frame_key = f"{ts.item():06d}"
+                fe = frames.get(frame_key, {}).get("embedding")
+                if fe is not None:
+                    emb_list.append(np.array(fe, dtype=np.float32))
+                elif mean_emb is not None:
+                    emb_list.append(np.array(mean_emb, dtype=np.float32))
+                else:
+                    emb_list.append(np.zeros(512, dtype=np.float32))
+            if emb_list:
+                example["arcface_embedding"] = torch.tensor(np.stack(emb_list), dtype=torch.float32)
+                example["arcface_mean_embedding"] = torch.tensor(np.array(mean_emb, dtype=np.float32)) if mean_emb is not None else None
+            else:
+                example["arcface_embedding"] = None
+                example["arcface_mean_embedding"] = None
+        else:
+            example["arcface_embedding"] = None
+            example["arcface_mean_embedding"] = None
 
         # Explicitly delete the large dictionaries to free memory immediately
         del images
@@ -479,7 +512,8 @@ def process_single_key(key: str, path: Path, stage: str, pack_inconsistent: bool
 
 def worker_process(worker_id: int, keys_queue: Queue, chunk_counter: Value, counter_lock: Lock,
                    stage: str, path: Path, pack_inconsistent: bool, output_dir: Path, 
-                   target_bytes: int, progress_queue: Queue, face_bboxes: Optional[dict] = None):
+                   target_bytes: int, progress_queue: Queue, face_bboxes: Optional[dict] = None,
+                   arcface_data: Optional[dict] = None):
     """Worker process that processes keys and saves chunks."""
     
     chunk_size = 0
@@ -524,7 +558,7 @@ def worker_process(worker_id: int, keys_queue: Queue, chunk_counter: Value, coun
             if key is None:  # Poison pill
                 break
                 
-            example, num_bytes, error = process_single_key(key, path, stage, pack_inconsistent, output_dir, face_bboxes)
+            example, num_bytes, error = process_single_key(key, path, stage, pack_inconsistent, output_dir, face_bboxes, arcface_data)
             
             if error:
                 progress_queue.put(('error', worker_id, key, error))
@@ -808,6 +842,8 @@ if __name__ == "__main__":
                         help="Path to text file containing .torch filenames to reprocess (one per line)")
     parser.add_argument("--dryrun", action="store_true",
                         help="Dry run mode: show what would be processed without actually processing")
+    parser.add_argument("--arcface-npy", type=str, default=ARCFACE_NPY_BASE,
+                        help="Base path for ArcFace NPY files: we load {path}_train.npy and {path}_val.npy (from thuman_arcface_embeddings.py). Set to empty to disable.")
     args = parser.parse_args()
     
     RASTERIZE_LBS_WEIGHTS = args.rasterize_lbs
@@ -963,6 +999,16 @@ if __name__ == "__main__":
                 else:
                     print(f"Warning: --face-bboxes file not found: {face_bbox_path}, skipping face bbox enrichment")
 
+            # Load ArcFace embeddings NPY for this stage (from thuman_arcface_embeddings.py)
+            arcface_data = None
+            if args.arcface_npy:
+                arcface_path = Path(f"{args.arcface_npy}_{stage}.npy")
+                if arcface_path.exists():
+                    arcface_data = np.load(arcface_path, allow_pickle=True).item()
+                    print(f"Loaded ArcFace embeddings for {len(arcface_data)} scenes from {arcface_path}")
+                else:
+                    print(f"Warning: --arcface-npy file not found: {arcface_path}, skipping ArcFace enrichment")
+
             # Set up multiprocessing
             mp.set_start_method('spawn', force=True)
             
@@ -991,7 +1037,7 @@ if __name__ == "__main__":
                         target=worker_process,
                         args=(worker_id, keys_queue, chunk_counter, counter_lock,
                               stage, path, pack_inconsistent, OUTPUT_DIR,
-                              TARGET_BYTES_PER_CHUNK, progress_queue, face_bboxes)
+                              TARGET_BYTES_PER_CHUNK, progress_queue, face_bboxes, arcface_data)
                     )
                     p.start()
                     stage_workers.append(p)
