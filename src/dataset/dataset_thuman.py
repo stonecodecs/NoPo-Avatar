@@ -227,10 +227,12 @@ class DatasetTHuman(IterableDataset):
                 context_face_bboxes = []
                 if "face_bbox" in example:
                     context_face_bboxes = [example["face_bbox"][index.item()] for index in context_indices]
+                    context_face_bboxes = torch.stack(context_face_bboxes)
 
                 context_face_confs = []
                 if "face_conf" in example:
                     context_face_confs = [example["face_conf"][index.item()] for index in context_indices]
+                    context_face_confs = torch.stack(context_face_confs)
 
                 # NOTE: 'target' images in this case refer to novel views not used as context
                 # but still influences the loss
@@ -246,10 +248,12 @@ class DatasetTHuman(IterableDataset):
                 target_face_bboxes = []
                 if "face_bbox" in example:
                     target_face_bboxes = [example["face_bbox"][index.item()] for index in target_indices]
+                    target_face_bboxes = torch.stack(target_face_bboxes)
 
                 target_face_confs = []
                 if "face_conf" in example:
                     target_face_confs = [example["face_conf"][index.item()] for index in target_indices]
+                    target_face_confs = torch.stack(target_face_confs)
 
                 # arcface embedding per view
                 context_arcface_embeddings = []
