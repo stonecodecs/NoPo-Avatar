@@ -1,0 +1,14 @@
+# Face loss: MSE + LPIPS + ArcFace on face crops (inside face_bbox).
+# Skip views with invalid/zero-area bbox. Set arcface_embedder on the LossFace
+# instance to enable ArcFace term (e.g. from insightface).
+faceloss:
+  mse:
+    weight: 1.0
+    use_conf: false
+    alpha: 0.0
+    apply_mask: false
+  lpips:
+    weight: 0.1
+    apply_after_step: 0
+  arcface:
+    weight: 0.1

@@ -161,6 +161,8 @@ class LossFace(Loss[LossFaceCfg, LossFaceCfgWrapper]):
         face_bbox = _get_face_bbox_tensor(batch, "target")
         if face_bbox is None:
             return torch.tensor(0.0, device=prediction.color.device)
+        else:
+            face_bbox = face_bbox.squeeze(1)
 
         pred_color = prediction.color
         gt_image = target["image"]

@@ -5,10 +5,10 @@ defaults:
   - override /model/encoder: template_uv_face
   - override /model/encoder/backbone: croco_multi2
   - override /model/decoder: lbs_splatting_cuda
-  - override /loss: [mse, lpips, chamfer, projection, lbs_weights]
+  - override /loss: [mse, lpips, chamfer, projection, lbs_weights, faceloss]
 
 wandb:
-  name: tpose_faceencoder
+  name: tpose_faceencoder_arcface
   tags: [thuman2.1, 256x256]
 
 model:
@@ -46,9 +46,19 @@ loss:
   mse:
     apply_mask: true
 
+  faceloss:
+    mse:
+      weight: 1.0
+    lpips:
+      weight: 0.1
+      apply_after_step: 0
+    arcface:
+      weight: 0.1
+
+
 dataset:
   thuman:
-    roots: [datasets/thuman2.1]
+    roots: [datasets/thuman2.1_arcface]
     augment: true
 #    template_image_shape: [1024, 1024]
     template_image_shape: [256, 256]
