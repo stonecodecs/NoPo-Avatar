@@ -128,6 +128,39 @@ def center_crop(
     return images, masks, lbs_weights, intrinsics
 
 
+def get_rescale_and_crop_transform(
+    h_in: int, w_in: int, h_out: int, w_out: int, pad: bool = False
+) -> tuple[float, float, float, float]:
+    """
+    Return (scale_x, scale_y, offset_x, offset_y) to transform pixel coords from
+    input image (h_in, w_in) to output image (h_out, w_out), matching rescale_and_crop.
+    Transform: x_out = x_in * scale_x + offset_x, y_out = y_in * scale_y + offset_y.
+    """
+    if h_out <= h_in and w_out <= w_in:
+        if pad:
+            scale_factor = min(h_out / h_in, w_out / w_in)
+        else:
+            scale_factor = max(h_out / h_in, w_out / w_in)
+        h_scaled = round(h_in * scale_factor)
+        w_scaled = round(w_in * scale_factor)
+        scale_x = w_scaled / w_in
+        scale_y = h_scaled / h_in
+        if pad:
+            col = (w_out - w_scaled) // 2
+            row = (h_out - h_scaled) // 2
+            return scale_x, scale_y, float(col), float(row)
+        else:
+            col = (w_scaled - w_out) // 2
+            row = (h_scaled - h_out) // 2
+            return scale_x, scale_y, float(-col), float(-row)
+    else:
+        # No scaling; only pad (or crop if output smaller in one dim – rare)
+        scale_x, scale_y = 1.0, 1.0
+        col = (w_out - w_in) // 2
+        row = (h_out - h_in) // 2
+        return scale_x, scale_y, float(col), float(row)
+
+
 def rescale_and_crop(
     images: Float[Tensor, "*#batch c h w"],
     masks: Float[Tensor, "*#batch h w"],
@@ -209,7 +242,28 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool 
         image_gt, _, _, _ = rescale_and_crop(
             views["image_gt"], views["mask"], None, views["intrinsics"], shape, pad, bgcolor)
         new_views["image_gt"] = image_gt
-    
+
+    # Transform face_bbox from input image coords to resized/cropped image coords
+    if "face_bbox" in views and views["face_bbox"] is not None and len(views["face_bbox"]) > 0:
+        *_, h_in, w_in = views["image"].shape
+        h_out, w_out = shape
+        scale_x, scale_y, offset_x, offset_y = get_rescale_and_crop_transform(
+            int(h_in), int(w_in), int(h_out), int(w_out), pad
+        )
+        bbox = views["face_bbox"].float()  # (..., 4) x1, y1, x2, y2
+        device = bbox.device
+        scale_x = torch.tensor(scale_x, device=device, dtype=bbox.dtype)
+        scale_y = torch.tensor(scale_y, device=device, dtype=bbox.dtype)
+        offset_x = torch.tensor(offset_x, device=device, dtype=bbox.dtype)
+        offset_y = torch.tensor(offset_y, device=device, dtype=bbox.dtype)
+        # x1,y1,x2,y2 -> scale and shift
+        new_views["face_bbox"] = torch.stack([
+            bbox[..., 0] * scale_x + offset_x,
+            bbox[..., 1] * scale_y + offset_y,
+            bbox[..., 2] * scale_x + offset_x,
+            bbox[..., 3] * scale_y + offset_y,
+        ], dim=-1)
+
     return new_views
 
 
