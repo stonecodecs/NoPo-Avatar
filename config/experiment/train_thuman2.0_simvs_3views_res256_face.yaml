@@ -1,5 +1,20 @@
 # @package _global_
-
+#
+# Command-line overrides (run from repo root, use + to add and ~ to remove):
+#
+#   # Change dataset path (list: no spaces after commas)
+#   python src/main.py experiment=train_thuman2.0_simvs_3views_res256_face dataset.thuman.roots=[/path/to/thuman]
+#
+#   # Disable faceloss LPIPS or ArcFace weight
+#   ... loss.faceloss.lpips.weight=0
+#   ... loss.faceloss.arcface.weight=0.1
+#
+#   # Remove faceloss entirely (override loss list; no spaces)
+#   ... loss=[mse,lpips,chamfer,projection,lbs_weights]
+#
+#   # Remove LPIPS loss entirely
+#   ... loss=[mse,chamfer,projection,lbs_weights,faceloss]
+#
 defaults:
   - /dataset@_group_.thuman: thuman
   - override /model/encoder: template_uv_face
