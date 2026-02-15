@@ -297,6 +297,9 @@ class DatasetTHuman(IterableDataset):
                     target_images, target_masks,
                     self.cfg.background_color)
 
+                # also set the background color for image_gt
+                context_images_gt = context_images_gt * context_masks.unsqueeze(1) + bgcolor[None, :, None, None] * (1 - context_masks.unsqueeze(1))
+
                 if self.cfg.skip_bad_shape and (context_image_invalid or target_image_invalid):
                     print(
                         f"Skipped bad example {example['key']}. Context shape was "

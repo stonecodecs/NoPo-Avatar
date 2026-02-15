@@ -63,6 +63,8 @@ def reflect_views(views: AnyViews) -> AnyViews:
         "cnl_Rs": cnl_Rs,
         "cnl_Ts": cnl_Ts,
     }
+    if "image_gt" in views and views["image_gt"] is not None:
+        new_views["image_gt"] = views["image_gt"].flip(-1)
     if "lbs_weights" in views:
         lbs_weights = views["lbs_weights"].flip(-2)
         joint_flip = SMPLX_JOINT_FLIP if views["use_smplx"] else SMPL_JOINT_FLIP
