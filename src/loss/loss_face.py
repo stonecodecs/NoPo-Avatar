@@ -60,8 +60,9 @@ class LossFaceCfgWrapper:
 # Helpers: face crop extraction and valid mask
 # ---------------------------------------------------------------------------
 
-def _get_face_bbox_tensor(batch: BatchedExample, key: str = "target") -> Tensor | None:
+def _get_face_bbox_tensor(batch: BatchedExample, key: str = "target", output_size: int = 224) -> Tensor | None:
     """Return face_bbox as (B, V, 4) or None if missing/empty."""
+    # The dataset shim properly converts, but this makes the bbox wrt 224x224 images (need to update here!)
     views = batch.get(key)
     if views is None:
         return None
@@ -153,14 +154,14 @@ class LossFace(Loss[LossFaceCfg, LossFaceCfgWrapper]):
         batch: BatchedExample,
         gaussians: Gaussians,
         global_step: int,
-        is_target: bool = True
+        is_target: bool = True # can use context image branches later, but for now only target
     ) -> tuple[Float[Tensor, ""], dict[str, Float[Tensor, ""]]]:
         imgtype = "target" if is_target else "context"
         context_or_target_imgs = batch.get(imgtype)
         if context_or_target_imgs is None:
             return torch.tensor(0.0, device=prediction.color.device), {}
 
-        face_bbox = _get_face_bbox_tensor(batch, imgtype)
+        face_bbox = _get_face_bbox_tensor(batch, imgtype, output_size=self.face_crop_size)
         if face_bbox is None:
             return torch.tensor(0.0, device=prediction.color.device), {}
         else:

@@ -68,6 +68,17 @@ def reflect_views(views: AnyViews) -> AnyViews:
         joint_flip = SMPLX_JOINT_FLIP if views["use_smplx"] else SMPL_JOINT_FLIP
         lbs_weights = lbs_weights[..., joint_flip]
         new_views["lbs_weights"] = lbs_weights
+    # Reflect face_bbox (x1, y1, x2, y2) so it matches the flipped image: x -> W - 1 - x
+    if "face_bbox" in views and views["face_bbox"] is not None and views["face_bbox"].numel() > 0:
+        bbox = views["face_bbox"]
+        w = views["image"].shape[-1] - 1
+        # Reflected: new_x1 = W-1 - old_x2, new_x2 = W-1 - old_x1; y unchanged
+        new_views["face_bbox"] = torch.stack([
+            w - bbox[..., 2],  # x1
+            bbox[..., 1],     # y1
+            w - bbox[..., 0], # x2
+            bbox[..., 3],     # y2
+        ], dim=-1)
     return new_views
 
 

@@ -416,7 +416,8 @@ class DatasetTHuman(IterableDataset):
                     example = apply_augmentation_shim(example)
                     if self.cfg.augment_color_jitter:
                         example = apply_color_jitter_shim(example)
-                yield apply_crop_shim(example, tuple(self.cfg.input_image_shape))
+                shimmed_data = apply_crop_shim(example, tuple(self.cfg.input_image_shape))
+                yield shimmed_data
 
     def convert_poses(
         self,

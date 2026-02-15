@@ -274,9 +274,18 @@ class ModelWrapper(LightningModule):
                 loss_aux += loss_template
                 loss_dict[loss_fn.name + "_template"] = loss_template
 
-            if "output_context" in output_aux and loss_fn.name in ["lpips", "mse", "ssim"]:
-                loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=False, weight="rgb")
-                self.log(f"loss/{loss_fn.name}_context", loss_context)
+            if "output_context" in output_aux and loss_fn.name in ["lpips", "mse", "ssim", "faceloss"]:
+                if loss_fn.name == "faceloss" and batch['context'].get('face_bbox', None) is not None:
+                    loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, is_target=False)
+                    self.log(f"loss/{loss_fn.name}_context", loss_context[0])
+                    loss_context_dict = loss_context[1]
+                    for k, v in loss_context_dict.items():
+                        self.log(f"loss/{loss_fn.name}_context_{k}", v)
+                        loss_dict[f"{loss_fn.name}_context_{k}"] = v
+                    loss_context = loss_context[0] 
+                else:
+                    loss_context = loss_fn.forward(output_aux["output_context"], batch, gaussians, self.global_step, compare_target=False, weight="rgb")
+                    self.log(f"loss/{loss_fn.name}_context", loss_context)
                 loss_aux += loss_context
                 loss_dict[loss_fn.name + "_context"] = loss_context
 
