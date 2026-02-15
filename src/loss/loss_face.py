@@ -8,7 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from jaxtyping import Float
+from jaxtyping import Float, Bool
+from typing import Literal
 from lpips import LPIPS
 from torch import Tensor
 import torchvision
@@ -77,7 +78,7 @@ def _get_face_bbox_tensor(batch: BatchedExample, key: str = "target") -> Tensor 
     return bboxes
 
 
-def _valid_face_mask(bboxes: Float[Tensor, "b v 4"]) -> Float[Tensor, "b v"]:
+def _valid_face_mask(bboxes: Float[Tensor, "b v 4"]) -> Bool[Tensor, "b v"]:
     """True where face bbox has area > 0 (width and height > 1 pixel)."""
     x1, y1, x2, y2 = bboxes[..., 0], bboxes[..., 1], bboxes[..., 2], bboxes[..., 3]
     w = x2 - x1
@@ -116,13 +117,12 @@ def _crop_faces_roi(
     device = images.device
     images_flat = rearrange(images, "b v c h w -> (b v) c h w")
     bboxes_flat = rearrange(bboxes, "b v c -> (b v) c")
-    valid_flat = _valid_face_mask(rearrange(bboxes, "b v c -> b v")).reshape(-1)
     rois_xyxy = _squared_rois_xyxy(bboxes_flat, device)
     batch_idx = torch.arange(B * V, device=device, dtype=torch.float32).unsqueeze(1)
     rois = torch.cat([batch_idx, rois_xyxy], dim=1)  # (BV, 5) for roi_align
-    crops = torchvision.ops.roi_align(
+    crops = torchvision.ops.roi_align( # square crop around the face coordinates
         images_flat,
-        [rois],
+        rois,
         output_size=(output_size, output_size),
         spatial_scale=1.0,
         sampling_ratio=-1,
@@ -153,36 +153,37 @@ class LossFace(Loss[LossFaceCfg, LossFaceCfgWrapper]):
         batch: BatchedExample,
         gaussians: Gaussians,
         global_step: int,
-    ) -> Float[Tensor, ""]:
-        target = batch.get("target")
-        if target is None:
-            return torch.tensor(0.0, device=prediction.color.device)
+        is_target: bool = True
+    ) -> tuple[Float[Tensor, ""], dict[str, Float[Tensor, ""]]]:
+        imgtype = "target" if is_target else "context"
+        context_or_target_imgs = batch.get(imgtype)
+        if context_or_target_imgs is None:
+            return torch.tensor(0.0, device=prediction.color.device), {}
 
-        face_bbox = _get_face_bbox_tensor(batch, "target")
+        face_bbox = _get_face_bbox_tensor(batch, imgtype)
         if face_bbox is None:
-            return torch.tensor(0.0, device=prediction.color.device)
+            return torch.tensor(0.0, device=prediction.color.device), {}
         else:
             face_bbox = face_bbox.squeeze(1)
 
         pred_color = prediction.color
-        gt_image = target["image"]
+        gt_image = context_or_target_imgs["image"] if is_target else context_or_target_imgs["image_gt"]
         if pred_color.shape != gt_image.shape:
-            return torch.tensor(0.0, device=prediction.color.device)
+            return torch.tensor(0.0, device=prediction.color.device), {}
 
         B, V = pred_color.shape[0], pred_color.shape[1]
         device = pred_color.device
         zero = torch.tensor(0.0, device=device)
 
         # Crop to face regions
-        pred_crops, valid = _crop_faces_roi(
-            pred_color, face_bbox, output_size=self.face_crop_size
-        )
+        pred_crops, valid = _crop_faces_roi(pred_color, face_bbox, output_size=self.face_crop_size)
         gt_crops, _ = _crop_faces_roi(gt_image, face_bbox, output_size=self.face_crop_size)
         n_valid = valid.sum().item()
         if n_valid == 0:
-            return zero
+            return zero, {}
 
         # MSE on valid face crops only
+        sublosses = {}
         mse_loss = zero.clone()
         if self.cfg.mse.weight != 0:
             # Mask invalid crops so they don't contribute
@@ -190,6 +191,8 @@ class LossFace(Loss[LossFaceCfg, LossFaceCfgWrapper]):
             diff = (pred_crops - gt_crops) ** 2
             diff = diff * valid_flat.view(-1, 1, 1, 1)
             mse_loss = self.cfg.mse.weight * diff.sum() / (n_valid * pred_crops.shape[1] * (self.face_crop_size ** 2) + 1e-8)
+            sublosses["mse"] = mse_loss
+
 
         # LPIPS on valid face crops only
         lpips_loss = zero.clone()
@@ -199,11 +202,12 @@ class LossFace(Loss[LossFaceCfg, LossFaceCfgWrapper]):
             lpips_per = lpips_per.squeeze(-1).squeeze(-1).squeeze(-1)
             lpips_loss = (lpips_per * valid_flat).sum() / (n_valid + 1e-8)
             lpips_loss = self.cfg.lpips.weight * lpips_loss
+            sublosses["lpips"] = lpips_loss
 
         # ArcFace: 1 - cos_sim(pred_emb, gt_emb) when embedder and gt embeddings present
-        arcface_loss = zero.clone()
+        arcface_loss = zero.clone() # default, this is not implemented
         if self.cfg.arcface.weight != 0 and self.arcface_embedder is not None:
-            gt_emb = target.get("arcface_mean_embedding")
+            gt_emb = context_or_target_imgs.get("arcface_mean_embedding")
             if gt_emb is not None and gt_emb.numel() > 0:
                 pred_emb = self.arcface_embedder(pred_crops)
                 if pred_emb is not None:
@@ -217,5 +221,7 @@ class LossFace(Loss[LossFaceCfg, LossFaceCfgWrapper]):
                         valid_flat = rearrange(valid, "b v -> (b v)")
                         arcface_per = (1.0 - cos) * valid_flat
                         arcface_loss = self.cfg.arcface.weight * arcface_per.sum() / (n_valid + 1e-8)
+                        sublosses["arcface"] = arcface_loss
 
-        return mse_loss + lpips_loss + arcface_loss
+        total = mse_loss + lpips_loss + arcface_loss
+        return total, sublosses

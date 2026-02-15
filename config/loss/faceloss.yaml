@@ -11,4 +11,4 @@ faceloss:
     weight: 0.1
     apply_after_step: 0
   arcface:
-    weight: 0.1
+    weight: 0.0

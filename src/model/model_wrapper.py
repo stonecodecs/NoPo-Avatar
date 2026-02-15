@@ -241,13 +241,23 @@ class ModelWrapper(LightningModule):
         loss_dict = {}
         for loss_fn in self.losses:
             if loss_fn.name in ["lbs_weights", "pts3d"]:
-                loss = loss_fn.forward(output, batch, gaussians_rgb, self.global_step)
+                result = loss_fn.forward(output, batch, gaussians_rgb, self.global_step)
             elif loss_fn.name == "noise":
-                loss = loss_fn.forward(output_aux["output_noise"], batch, gaussians, self.global_step)
+                result = loss_fn.forward(output_aux["output_noise"], batch, gaussians, self.global_step)
             elif loss_fn.name == "mse":
-                loss = loss_fn.forward(output, batch, gaussians, self.global_step)
+                result = loss_fn.forward(output, batch, gaussians, self.global_step)
+            elif loss_fn.name == "faceloss":
+                result = loss_fn.forward(output, batch, gaussians, self.global_step)
             else:
-                loss = loss_fn.forward(output, batch, gaussians, self.global_step)
+                result = loss_fn.forward(output, batch, gaussians, self.global_step)
+            # Faceloss returns (total, breakdown) for per-term logging; others return a scalar
+            if isinstance(result, tuple):
+                loss, breakdown = result
+                for k, v in breakdown.items():
+                    self.log(f"loss/{loss_fn.name}_{k}", v)
+                    loss_dict[f"{loss_fn.name}_{k}"] = v  # include in printed loss line
+            else:
+                loss = result
             self.log(f"loss/{loss_fn.name}", loss)
             loss_dict[loss_fn.name] = loss
 
