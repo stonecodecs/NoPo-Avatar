@@ -20,6 +20,7 @@ from ...dataset.types import BatchedExample, DataShim
 from ...geometry.projection import sample_image_grid
 from ..types import Gaussians
 from .backbone import Backbone, BackboneCfg, get_backbone
+from .backbone.croco.blocks import CrossAttention
 from .common.gaussian_lbs_adapter import GaussianLBSAdapter, GaussianLBSAdapterCfg, UnifiedGaussianLBSAdapter
 from .encoder import Encoder
 from .visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpipolarCfg
@@ -100,19 +101,22 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
             self.face_encoder = EncoderHeadDINOv2FPN(cfg.face_encoder_cfg)
             dino_dim = cfg.face_encoder_cfg.out_dim
 
-        combined_dim = self.backbone.dec_embed_dim + dino_dim
-        self._image_branch_backbone = (
-            _BackboneDimOverride(self.backbone, combined_dim) if dino_dim > 0 else self.backbone
-        )
+        # Face features fused via cross-attention (query=CroCo, key/value=face); image branch stays 768-d
+        self._image_branch_backbone = self.backbone
         self._dec_to_combined_proj = None
         if dino_dim > 0:
-            self._dec_to_combined_proj = nn.Linear(self.backbone.dec_embed_dim, combined_dim)
+            self.face_kv_proj = nn.Linear(dino_dim, self.backbone.dec_embed_dim)
+            self.face_cross_attn = CrossAttention(
+                self.backbone.dec_embed_dim,
+                rope=None,
+                num_heads=8,
+                qkv_bias=False,
+                attn_drop=0.0,
+                proj_drop=0.0,
+            )
             with torch.no_grad():
-                # zero-init
-                self._dec_to_combined_proj.weight.zero_()
-                self._dec_to_combined_proj.bias.zero_()
-                r = min(self.backbone.dec_embed_dim, combined_dim)
-                self._dec_to_combined_proj.weight[:r, :r] = torch.eye(r) # identity for backbone
+                self.face_cross_attn.proj.weight.zero_()
+                self.face_cross_attn.proj.bias.zero_()
 
         self.pose_free = cfg.pose_free
         if self.pose_free:
@@ -509,43 +513,25 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
         dec_feat_for_image = list(dec_feat)  # default; replaced when fusing DINO
         # this is [B,3,(HW)_patch, C_croco=768]
 
-        # new face encoder step
+        # Face encoder: fuse via cross-attention (query=full-image CroCo, key/value=face crop features)
         if self.face_encoder is not None:
             face_bboxes = context["face_bbox"]
-            images = context["image"] # (B,V,C=3,H,W)
+            images = context["image"]  # (B,V,C=3,H,W)
             if images.max() > 1.0 or images.min() < 0.0:
                 images = (images + 1.0) / 2.0
             images = images.clamp(0.0, 1.0)
             with torch.no_grad():
-                dino_out = self.get_face_features(images, face_bboxes) # (B*V, N_dino, C_dino)
-            dino_feats = dino_out
-            # dino_feats = rearrange(dino_out, "(b v) l c -> b v l c", b=b, v=v)
-
-            n_patches_croco = croco_feats.shape[2]
-            side_croco = int(round(n_patches_croco ** 0.5))
-            n_patches_dino = dino_feats.shape[2]
-            side_dino = int(round(n_patches_dino ** 0.5))
-
-            dino_2d = rearrange(
-                dino_feats, "b v (h w) c -> (b v) c h w", h=side_dino, w=side_dino
-            ).contiguous()
-            dino_resized = F.interpolate(
-                dino_2d,
-                size=(side_croco, side_croco),
-                mode="bilinear",
-                align_corners=False,
+                dino_out = self.get_face_features(images, face_bboxes)  # (B, V, N_dino, C_dino)
+            face_kv = self.face_kv_proj(dino_out.float())  # (B, V, N_dino, dec_embed_dim)
+            face_kv = rearrange(face_kv, "b v n c -> (b v) n c", b=b, v=v)  # (B*V, N_dino, 768)
+            croco_flat = rearrange(croco_feats.float(), "b v l c -> (b v) l c")
+            cross_out = self.face_cross_attn(
+                croco_flat, face_kv, face_kv, None, None
             )
-            dino_aligned = rearrange(
-                dino_resized, "(b v) c h w -> b v (h w) c", b=b, v=v
-            ).contiguous()
-
-            fused_feats = torch.cat([croco_feats.float(), dino_aligned.float()], dim=-1) # 768(C_croco) + 256(C_dino) = 1024(C_fused)
-            # dec_feat[-1][0] is in the encoder dim, so we want to project to decoder dim
-            first_dec_feat = self.backbone.decoder_embed(dec_feat[0:1][0])
-
-            dec_feat_for_image = [self._dec_to_combined_proj(first_dec_feat.float())] + [
-                self._dec_to_combined_proj(tok.float()) for tok in dec_feat[1:-1]
-            ] + [fused_feats]
+            cross_out = croco_flat + cross_out  # residual
+            cross_out = rearrange(cross_out, "(b v) l c -> b v l c", b=b, v=v)
+            dec_feat_for_image = list(dec_feat)
+            dec_feat_for_image[-1] = cross_out
 
         with torch.amp.autocast('cuda', enabled=False):
             if self.pts3d_head_type == 'dpt':

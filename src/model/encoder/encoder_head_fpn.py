@@ -212,7 +212,7 @@ class EncoderHeadDINOv2FPN(nn.Module):
                 dim=1,
             )
         else:
-            ret = out_local.permute(0, 2, 3, 1).flatten(1, 2)
+            ret = out_local.permute(0, 2, 3, 1).flatten(1, 2) # (B,H,W,C) -> (B,HW,C)
         return ret
 
 
