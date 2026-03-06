@@ -93,7 +93,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope 
 
-    def forward(self, x, xpos):
+    def forward(self, x, xpos, attn_mask=None):
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).transpose(1,3)
@@ -104,8 +104,13 @@ class Attention(nn.Module):
             q = self.rope(q, xpos)
             k = self.rope(k, xpos)
 
-        # new one
-        x = F.scaled_dot_product_attention(q, k, v, scale=self.scale, dropout_p=self.dropout_p)
+        # attn_mask: (B, N) or (B, N, 1) bool, True=real token. Expand to (B,1,1,N) for SDPA key masking.
+        sdpa_mask = None
+        if attn_mask is not None:
+            m = attn_mask.squeeze(-1) if attn_mask.dim() == 3 else attn_mask
+            sdpa_mask = m[:, None, None, :]  # (B, 1, 1, N) — broadcasts over heads and queries
+
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask, scale=self.scale, dropout_p=self.dropout_p)
         x = x.transpose(1, 2).reshape(B, N, C)
 
         # # old one
@@ -133,8 +138,8 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x, xpos):
-        x = x + self.drop_path(self.attn(self.norm1(x), xpos))
+    def forward(self, x, xpos, attn_mask=None):
+        x = x + self.drop_path(self.attn(self.norm1(x), xpos, attn_mask=attn_mask))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -156,7 +161,7 @@ class CrossAttention(nn.Module):
         
         self.rope = rope
         
-    def forward(self, query, key, value, qpos, kpos):
+    def forward(self, query, key, value, qpos, kpos, key_mask=None):
         B, Nq, C = query.shape
         Nk = key.shape[1]
         Nv = value.shape[1]
@@ -169,8 +174,13 @@ class CrossAttention(nn.Module):
             q = self.rope(q, qpos)
             k = self.rope(k, kpos)
 
-        # new one
-        x = F.scaled_dot_product_attention(q, k, v, scale=self.scale, dropout_p=self.dropout_p)
+        # key_mask: (B, Nk) or (B, Nk, 1) bool, True=real key. Expand to (B,1,1,Nk) for SDPA.
+        sdpa_mask = None
+        if key_mask is not None:
+            m = key_mask.squeeze(-1) if key_mask.dim() == 3 else key_mask
+            sdpa_mask = m[:, None, None, :]  # (B, 1, 1, Nk)
+
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask, scale=self.scale, dropout_p=self.dropout_p)
         x = x.transpose(1, 2).reshape(B, Nq, C)
 
         # # old one
@@ -200,10 +210,10 @@ class DecoderBlock(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
         self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
 
-    def forward(self, x, y, xpos, ypos):
-        x = x + self.drop_path(self.attn(self.norm1(x), xpos))
+    def forward(self, x, y, xpos, ypos, x_mask=None, y_mask=None):
+        x = x + self.drop_path(self.attn(self.norm1(x), xpos, attn_mask=x_mask))
         y_ = self.norm_y(y)
-        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos))
+        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos, key_mask=y_mask))
         x = x + self.drop_path(self.mlp(self.norm3(x)))
         return x, y
         

@@ -187,6 +187,9 @@ class AsymmetricCroCoMultiUV(CroCoNet):
                 add_pose = pos[:, 0:1, :].clone()
                 add_pose[:, :, 0] += (pos[:, -1, 0].unsqueeze(-1) + 1)
                 pos = torch.cat((pos, add_pose), dim=1)
+                # The intrinsics token is always a real token — extend the mask with True.
+                if attn_mask is not None:
+                    attn_mask = torch.cat([attn_mask, attn_mask.new_ones(attn_mask.shape[0], 1, 1)], dim=1)
 
                 if not self.template_encoder_free:
                     template = torch.cat((template, intrinsics_embed.new_zeros(template.shape[0], 1, *intrinsics_embed.shape[2:])), dim=1)
@@ -202,12 +205,24 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         for blk in self.enc_blocks:
             if not self.template_encoder_free:
                 if is_same_shape:
-                    x, template = blk(torch.cat([x, template], dim=0), torch.cat([pos, pos_template], dim=0)).split([x.shape[0], template.shape[0]], dim=0)
+                    # Batch image and template along batch dim for a single efficient pass.
+                    # Template is always dense; combine its all-True mask with the image mask.
+                    if attn_mask is not None:
+                        templ_mask = attn_mask.new_ones(template.shape[0], template.shape[1], 1)
+                        combined_mask = torch.cat([attn_mask, templ_mask], dim=0)
+                    else:
+                        combined_mask = None
+                    out = blk(
+                        torch.cat([x, template], dim=0),
+                        torch.cat([pos, pos_template], dim=0),
+                        attn_mask=combined_mask,
+                    )
+                    x, template = out.split([x.shape[0], template.shape[0]], dim=0)
                 else:
-                    x = blk(x, pos)
-                    template = blk(template, pos_template)
+                    x = blk(x, pos, attn_mask=attn_mask)
+                    template = blk(template, pos_template)  # template is always dense, no mask needed
             else:
-                x = blk(x, pos)
+                x = blk(x, pos, attn_mask=attn_mask)
 
         x = self.enc_norm(x)
         if not self.template_encoder_free:
@@ -215,9 +230,9 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         else:
             template = repeat(self.template_embed, "l c -> b l c", b=template.shape[0])
             template = self.template_embedder(template)
-        return template, pos_template, x, pos, None
+        return template, pos_template, x, pos, attn_mask
 
-    def _decoder(self, feat_template, pose_template, feat, pose, extra_embed=None):
+    def _decoder(self, feat_template, pose_template, feat, pose, extra_embed=None, feat_mask=None):
         b, v, l, c = feat.shape
         final_output = [(feat_template, feat)]  # before projection
         if extra_embed is not None:
@@ -233,22 +248,54 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         def generate_ctx_views(x):
             b, v, l, c = x.shape
             ctx_views = x.unsqueeze(1).expand(b, v, v, l, c)
-            mask = torch.arange(v).unsqueeze(0) != torch.arange(v).unsqueeze(1)
+            mask = torch.arange(v, device=x.device).unsqueeze(0) != torch.arange(v, device=x.device).unsqueeze(1)
             ctx_views = ctx_views[:, mask].reshape(b, v, v - 1, l, c)  # B, V, V-1, L, C
             ctx_views = ctx_views.flatten(2, 3)  # B, V, (V-1)*L, C
             return ctx_views.contiguous()
 
+        def generate_ctx_views_mask(m):
+            # Same permutation as generate_ctx_views but for (B, V, L) bool masks.
+            b, v, l = m.shape
+            ctx = m.unsqueeze(1).expand(b, v, v, l)
+            excl = torch.arange(v, device=m.device).unsqueeze(0) != torch.arange(v, device=m.device).unsqueeze(1)
+            ctx = ctx[:, excl].reshape(b, v, v - 1, l).flatten(2, 3)  # B, V, (V-1)*L
+            return ctx.contiguous()
+
         pos_ctx = generate_ctx_views(pose)
+
+        # Pre-compute flattened masks for the decoder loop (None if no pruning).
+        img_mask_bvl = None       # (B*V, L) — image self-attention
+        img_mask_b_vl = None      # (B, V*L) — image keys seen by template cross-attention
+        img_mask_ctx_bvl = None   # (B*V, (V-1)*L) — ctx-view keys for image cross-attention
+        if feat_mask is not None:
+            img_mask_bvl = rearrange(feat_mask, "b v l -> (b v) l").contiguous()
+            img_mask_b_vl = rearrange(feat_mask, "b v l -> b (v l)").contiguous()
+            img_mask_ctx_bvl = rearrange(generate_ctx_views_mask(feat_mask), "b v l -> (b v) l").contiguous()
+
         for blk1, blk2 in zip(self.dec_blocks, self.dec_blocks2):
             feat_template_current, feat_current = final_output[-1]
             feat_current_ctx = generate_ctx_views(feat_current)
-            # img1 side
+
+            # blk1: template tokens as queries, image tokens as memory keys.
+            # Template self-attention is always dense; image key mask = img_mask_b_vl.
             f1, _ = blk1(
                 feat_template_current,
                 rearrange(feat_current, "b v l c -> b (v l) c").contiguous(),
                 pose_template,
-                rearrange(pose, "b v l c -> b (v l) c").contiguous())
-            # img2 side
+                rearrange(pose, "b v l c -> b (v l) c").contiguous(),
+                x_mask=None,
+                y_mask=img_mask_b_vl,
+            )
+
+            # blk2: image tokens as queries (self-attn), cross-attn to [template + ctx views].
+            # Self-attn mask = img_mask_bvl; cross-attn key mask = [all-True template | ctx mask].
+            if feat_mask is not None:
+                l_tmpl = feat_template_current.shape[1]
+                tmpl_key_mask = img_mask_bvl.new_ones(b * v, l_tmpl)          # template is dense
+                blk2_y_mask = torch.cat([tmpl_key_mask, img_mask_ctx_bvl], dim=1)
+            else:
+                blk2_y_mask = None
+
             f2, _ = blk2(
                 rearrange(feat_current, "b v l c -> (b v) l c").contiguous(),
                 torch.cat([
@@ -259,7 +306,9 @@ class AsymmetricCroCoMultiUV(CroCoNet):
                 torch.cat([
                     repeat(pose_template, "b l c -> (b v) l c", v=v).contiguous(),
                     rearrange(pos_ctx, "b v l c -> (b v) l c").contiguous()
-                ], dim=1)
+                ], dim=1),
+                x_mask=img_mask_bvl,
+                y_mask=blk2_y_mask,
             )
             f2 = rearrange(f2, "(b v) l c -> b v l c", b=b, v=v).contiguous()
             # store the result
@@ -310,22 +359,27 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         shape_template = torch.tensor(template.shape[-2:])[None].repeat(b, 1)
 
         if self.disable_checkpointing:
-            feat_template, pose_template, feat, pose, _ = self._encode_image(template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=foreground_masks)
+            feat_template, pose_template, feat, pose, enc_attn_mask = self._encode_image(template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=foreground_masks)
             # feat_template: [1, N_temp, embed_dim]
             # pose_template: [1, N_temp, 2]
             # feat: [BV, N_img, embed_dim]
             # pose: [BV, N_img, 2]
         else:
-            feat_template, pose_template, feat, pose, _ = checkpoint.checkpoint(self._encode_image, template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=context["mask"], use_reentrant=False)
+            feat_template, pose_template, feat, pose, enc_attn_mask = checkpoint.checkpoint(self._encode_image, template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=context["mask"], use_reentrant=False)
 
         feat = rearrange(feat, "(b v) l c -> b v l c", b=b, v=v).contiguous()
         pose = rearrange(pose, "(b v) l c -> b v l c", b=b, v=v).contiguous()
 
+        # Rearrange attn_mask to (B, V, L) for use in the decoder.
+        feat_mask = None
+        if enc_attn_mask is not None:
+            feat_mask = rearrange(enc_attn_mask.squeeze(-1), "(b v) l -> b v l", b=b, v=v).contiguous()
+
         # step 2: decoder
         if self.disable_checkpointing:
-            dec_feat_template, dec_feat = self._decoder(feat_template, pose_template, feat, pose)
+            dec_feat_template, dec_feat = self._decoder(feat_template, pose_template, feat, pose, feat_mask=feat_mask)
         else:
-            dec_feat_template, dec_feat = checkpoint.checkpoint(self._decoder, feat_template, pose_template, feat, pose, use_reentrant=False)
+            dec_feat_template, dec_feat = checkpoint.checkpoint(self._decoder, feat_template, pose_template, feat, pose, feat_mask=feat_mask, use_reentrant=False)
         shape = rearrange(shape_all, "(b v) c -> b v c", b=b, v=v).contiguous()
         images = rearrange(images_all, "(b v) c h w -> b v c h w", b=b, v=v).contiguous()
 
@@ -338,6 +392,8 @@ class AsymmetricCroCoMultiUV(CroCoNet):
                 dec_feat[i] = dec_feat[i][:, :, :-1]
             pose_template = pose_template[:, :-1]
             pose = pose[:, :, :-1]
+            if feat_mask is not None:
+                feat_mask = feat_mask[:, :, :-1]
 
         if return_pos:
             return dec_feat, shape, images, pose[:, :, :-1]
