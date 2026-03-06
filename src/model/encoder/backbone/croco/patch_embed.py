@@ -10,7 +10,7 @@ import torch
 from .blocks import PatchEmbed
 
 
-def get_patch_embed(patch_embed_cls, img_size, patch_size, enc_embed_dim, in_chans=3):
+def get_patch_embed(patch_embed_cls, img_size, patch_size, enc_embed_dim, in_chans=3, foreground_mask=None):
     assert patch_embed_cls in ['PatchEmbedDust3R', 'ManyAR_PatchEmbed', 'PrunedPatchEmbed']
     patch_embed = eval(patch_embed_cls)(img_size, patch_size, in_chans, enc_embed_dim)
     return patch_embed

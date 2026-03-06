@@ -62,9 +62,9 @@ default_dust3r_params = {
 
 @dataclass
 class BackboneCrocoMultiUVCfg:
-    name: Literal["croco_multi2"]
+    name: Literal["croco_uv", "croco_multi"]
     model: Literal["ViTLarge_BaseDecoder", "ViTBase_SmallDecoder", "ViTBase_BaseDecoder"]  # keep interface for the last two models, but they are not supported
-    patch_embed_cls: str = 'PrunedPatchEmbed'  # PatchEmbedDust3R or ManyAR_PatchEmbed or PrunedPatchEmbed
+    patch_embed_cls: str = 'PrunedPatchEmbed'  # only this one!
     asymmetry_decoder: bool = True
     intrinsics_embed_loc: Literal["encoder", "decoder", "none"] = 'none'
     intrinsics_embed_degree: int = 0
@@ -170,13 +170,13 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         """ No prediction head """
         return
 
-    def _encode_image(self, template, template_shape, image, true_shape, intrinsics_embed=None):
+    def _encode_image(self, template, template_shape, image, true_shape, intrinsics_embed=None, foreground_mask=None):
         # embed the image into patches  (x has size B x Npatches x C)
-        x, pos = self.patch_embed(image, true_shape=true_shape)
+        x, pos, attn_mask = self.patch_embed(image, true_shape=true_shape, foreground_mask=foreground_mask)
         if template.shape[1] == 24 + 3:
-            template, pos_template = self.patch_embed_smpl(template, true_shape=template_shape)
+            template, pos_template, template_attn_mask = self.patch_embed_smpl(template, true_shape=template_shape)
         else:
-            template, pos_template = self.patch_embed_smplx(template, true_shape=template_shape)
+            template, pos_template, template_attn_mask = self.patch_embed_smplx(template, true_shape=template_shape)
 
         if intrinsics_embed is not None:
 
@@ -303,14 +303,16 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         images_all = rearrange(images_all, "b v c h w -> (b v) c h w").contiguous()
         shape_all = torch.tensor(images_all.shape[-2:])[None].repeat(b*v, 1)
 
+        foreground_masks = rearrange(context["mask"], "b v h w -> (b v) 1 h w").contiguous()
+
         template = torch.cat([context["template_3d"], context["template_lbs_weights"]], dim=-1)
         template = rearrange(template, "b h w c -> b c h w").contiguous()
         shape_template = torch.tensor(template.shape[-2:])[None].repeat(b, 1)
 
         if self.disable_checkpointing:
-            feat_template, pose_template, feat, pose, _ = self._encode_image(template, shape_template, images_all, shape_all, intrinsic_embedding_all)
+            feat_template, pose_template, feat, pose, _ = self._encode_image(template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=foreground_masks)
         else:
-            feat_template, pose_template, feat, pose, _ = checkpoint.checkpoint(self._encode_image, template, shape_template, images_all, shape_all, intrinsic_embedding_all, use_reentrant=False)
+            feat_template, pose_template, feat, pose, _ = checkpoint.checkpoint(self._encode_image, template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=context["mask"], use_reentrant=False)
 
         feat = rearrange(feat, "(b v) l c -> b v l c", b=b, v=v).contiguous()
         pose = rearrange(pose, "(b v) l c -> b v l c", b=b, v=v).contiguous()

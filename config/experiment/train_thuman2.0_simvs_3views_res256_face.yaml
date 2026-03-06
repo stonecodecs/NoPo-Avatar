@@ -18,7 +18,7 @@
 defaults:
   - /dataset@_group_.thuman: thuman
   - override /model/encoder: template_uv_face
-  - override /model/encoder/backbone: croco_multi2
+  - override /model/encoder/backbone: croco_uv
   - override /model/decoder: lbs_splatting_cuda
   - override /loss: [mse, lpips, chamfer, projection, lbs_weights, faceloss]
 

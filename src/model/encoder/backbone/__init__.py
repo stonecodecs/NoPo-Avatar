@@ -15,7 +15,7 @@ BACKBONES: dict[str, Backbone[Any]] = {
     "croco": AsymmetricCroCo,
     "croco_multi": AsymmetricCroCoMulti,
     "croco_multi2": AsymmetricCroCoMulti2,
-    "croco_multi_uv": AsymmetricCroCoMultiUV,
+    "croco_uv": AsymmetricCroCoMultiUV,
 }
 
 BackboneCfg = BackboneResnetCfg | BackboneDinoCfg | BackboneCrocoCfg | BackboneCrocoMulti2Cfg | BackboneCrocoMultiUVCfg
