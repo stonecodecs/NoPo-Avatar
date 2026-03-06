@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # import dust3r.utils.path_to_croco
-from .dpt_block import DPTOutputAdapter, Interpolate
+from .dpt_block import DPTOutputAdapter, Interpolate, tokens_to_grid
 from .postprocess import postprocess
 
 
@@ -103,7 +103,7 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         if len(self.hooks) < 4:
             self.act_postprocess = self.act_postprocess[-len(self.hooks):]
 
-    def forward(self, encoder_tokens: List[torch.Tensor], image_size=None, ray_embedding=None):
+    def forward(self, encoder_tokens: List[torch.Tensor], image_size=None, ray_embedding=None, pos=None):
         assert self.dim_tokens_enc is not None, 'Need to call init(dim_tokens_enc) function first'
         encoder_tokens, images = encoder_tokens[:-1], encoder_tokens[-1]
         # H, W = input_info['image_size']
@@ -119,8 +119,12 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         # Extract only task-relevant tokens and ignore global tokens.
         layers = [self.adapt_tokens(l) for l in layers]
 
-        # Reshape tokens to spatial representation
-        layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W).contiguous() for l in layers]
+        
+        # Reshape tokens to spatial representation (rearrange if dense grid, else scatter by pos)
+        if pos is not None:
+            layers = [tokens_to_grid(l, N_H, N_W, pos=pos) for l in layers]
+        else: # old behavior with no pruning tokens
+            layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W).contiguous() for l in layers]
 
         layers = [self.act_postprocess[idx](l) for idx, l in enumerate(layers)]
         # Project layers to chosen feature dim
@@ -170,8 +174,8 @@ class PixelwiseTaskWithDPT(nn.Module):
         dpt_init_args = {} if dim_tokens is None else {'dim_tokens_enc': dim_tokens}
         self.dpt.init(**dpt_init_args)
 
-    def forward(self, x, img_info, ray_embedding=None):
-        out, feats = self.dpt(x, image_size=(img_info[0], img_info[1]), ray_embedding=ray_embedding)
+    def forward(self, x, img_info, ray_embedding=None, pos=None):
+        out, feats = self.dpt(x, image_size=(img_info[0], img_info[1]), ray_embedding=ray_embedding, pos=pos)
         if self.postprocess:
             out = self.postprocess(out, self.depth_mode, self.conf_mode)
         return out, feats

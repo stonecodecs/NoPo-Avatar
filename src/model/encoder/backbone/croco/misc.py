@@ -73,14 +73,14 @@ def transpose_to_landscape(head, activate=True):
         then transpose the result in landscape 
         and stack everything back together.
     """
-    def wrapper_no(decout, true_shape, ray_embedding=None):
+    def wrapper_no(decout, true_shape, ray_embedding=None, pos=None):
         B = len(true_shape)
         assert true_shape[0:1].allclose(true_shape), 'true_shape must be all identical'
         H, W = true_shape[0].cpu().tolist()
-        res = head(decout, (H, W), ray_embedding=ray_embedding)
+        res = head(decout, (H, W), ray_embedding=ray_embedding, pos=pos)
         return res
 
-    def wrapper_yes(decout, true_shape, ray_embedding=None):
+    def wrapper_yes(decout, true_shape, ray_embedding=None, pos=None):
         B = len(true_shape)
         # by definition, the batch is in landscape mode so W >= H
         H, W = int(true_shape.min()), int(true_shape.max())
@@ -91,14 +91,16 @@ def transpose_to_landscape(head, activate=True):
 
         # true_shape = true_shape.cpu()
         if is_landscape.all():
-            return head(decout, (H, W), ray_embedding=ray_embedding)
+            return head(decout, (H, W), ray_embedding=ray_embedding, pos=pos)
         if is_portrait.all():
-            return transposed(head(decout, (W, H), ray_embedding=ray_embedding))
+            return transposed(head(decout, (W, H), ray_embedding=ray_embedding, pos=pos))
 
-        # batch is a mix of both portraint & landscape
+        # batch is a mix of both portrait & landscape
         def selout(ar): return [d[ar] for d in decout]
-        l_result = head(selout(is_landscape), (H, W), ray_embedding=ray_embedding)
-        p_result = transposed(head(selout(is_portrait),  (W, H), ray_embedding=ray_embedding))
+        pos_l = pos[is_landscape] if pos is not None else None
+        pos_p = pos[is_portrait] if pos is not None else None
+        l_result = head(selout(is_landscape), (H, W), ray_embedding=ray_embedding, pos=pos_l)
+        p_result = transposed(head(selout(is_portrait), (W, H), ray_embedding=ray_embedding, pos=pos_p))
 
         # allocate full result
         result = {}

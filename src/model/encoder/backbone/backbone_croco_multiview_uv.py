@@ -311,6 +311,10 @@ class AsymmetricCroCoMultiUV(CroCoNet):
 
         if self.disable_checkpointing:
             feat_template, pose_template, feat, pose, _ = self._encode_image(template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=foreground_masks)
+            # feat_template: [1, N_temp, embed_dim]
+            # pose_template: [1, N_temp, 2]
+            # feat: [BV, N_img, embed_dim]
+            # pose: [BV, N_img, 2]
         else:
             feat_template, pose_template, feat, pose, _ = checkpoint.checkpoint(self._encode_image, template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=context["mask"], use_reentrant=False)
 
@@ -332,10 +336,12 @@ class AsymmetricCroCoMultiUV(CroCoNet):
             dec_feat = list(dec_feat)
             for i in range(len(dec_feat)):
                 dec_feat[i] = dec_feat[i][:, :, :-1]
+            pose_template = pose_template[:, :-1]
+            pose = pose[:, :, :-1]
 
         if return_pos:
             return dec_feat, shape, images, pose[:, :, :-1]
-        return [dec_feat_template, dec_feat], [shape_template, shape], [template, images]
+        return [dec_feat_template, dec_feat], [shape_template, shape], [template, images], pose_template, pose
 
     @property
     def patch_size(self) -> int:

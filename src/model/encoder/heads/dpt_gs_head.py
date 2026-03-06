@@ -13,7 +13,7 @@ from typing import List, Union, Tuple, Iterable, Optional
 import torch
 import torch.nn as nn
 # import dust3r.utils.path_to_croco
-from .dpt_block import DPTOutputAdapter, Interpolate, make_fusion_block
+from .dpt_block import DPTOutputAdapter, Interpolate, make_fusion_block, tokens_to_grid
 from .head_modules import UnetExtractor
 from .postprocess import postprocess
 
@@ -273,7 +273,7 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         if len(self.hooks) < 4:
             self.act_postprocess = self.act_postprocess[-len(self.hooks):]
 
-    def forward(self, encoder_tokens: List[torch.Tensor], depths, imgs, image_size=None, conf=None, return_feat=False):
+    def forward(self, encoder_tokens: List[torch.Tensor], depths, imgs, image_size=None, conf=None, return_feat=False, pos=None):
         assert self.dim_tokens_enc is not None, 'Need to call init(dim_tokens_enc) function first'
         # H, W = input_info['image_size']
         image_size = self.image_size if image_size is None else image_size
@@ -289,7 +289,11 @@ class DPTOutputAdapter_fix(DPTOutputAdapter):
         layers = [self.adapt_tokens(l) for l in layers]
 
         # Reshape tokens to spatial representation
-        layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W).contiguous() for l in layers]
+        if pos is not None:
+            layers = [tokens_to_grid(l, N_H, N_W, pos=pos) for l in layers]
+        else: # old behavior with no pruning tokens
+            layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W).contiguous() for l in layers]
+
 
         # print(self.upsample_type, 'layers', [l.shape for l in layers])  # 1/16, 1/16, 1/16, 1/16
         layers = [self.act_postprocess[idx](l) for idx, l in enumerate(layers)]
@@ -346,8 +350,8 @@ class PixelwiseTaskWithDPT(nn.Module):
         dpt_init_args = {} if dim_tokens is None else {'dim_tokens_enc': dim_tokens}
         self.dpt.init(**dpt_init_args)
 
-    def forward(self, x, depths, imgs, img_info, conf=None, return_feat=False):
-        out = self.dpt(x, depths, imgs, image_size=(img_info[0], img_info[1]), conf=conf, return_feat=return_feat)
+    def forward(self, x, depths, imgs, img_info, conf=None, return_feat=False, pos=None):
+        out = self.dpt(x, depths, imgs, image_size=(img_info[0], img_info[1]), conf=conf, return_feat=return_feat, pos=pos)
         if self.postprocess:
             out = self.postprocess(out, self.depth_mode, self.conf_mode)
         return out

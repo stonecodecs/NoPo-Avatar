@@ -263,6 +263,43 @@ class Interpolate(nn.Module):
 
         return x
 
+
+def tokens_to_grid(l: torch.Tensor, N_H: int, N_W: int, pos: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Reshape tokens (B, N, C) to spatial grid (B, C, N_H, N_W).
+
+    If pos is None, assumes tokens are in row-major order and uses rearrange.
+    If pos is (B, N, 2), scatters tokens to grid using (row, col) positions.
+    Padding tokens (which have pos 0,0 and appear at the end of the sequence) 
+    are automatically ignored to prevent overwriting the top-left corner.
+    """
+    B, N, C = l.shape
+    if pos is None:
+        return rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W).contiguous()
+    
+    # Scatter sparse tokens to grid using pos (row, col)
+    grid = torch.zeros(B, C, N_H, N_W, device=l.device, dtype=l.dtype)
+    
+    pos_h = pos[..., 0].long()
+    pos_w = pos[..., 1].long()
+
+    # Identify padding: since foreground tokens are at the start and in order,
+    # (0,0) can only be a valid foreground token at index 0.
+    # Any (0,0) at index > 0 is padding.
+    token_indices = torch.arange(N, device=l.device).unsqueeze(0).expand(B, N)
+    is_padding = (pos_h == 0) & (pos_w == 0) & (token_indices > 0)
+    
+    # Select only valid (non-padding) tokens
+    batch_idx, token_idx = torch.where(~is_padding)
+    h = pos_h[batch_idx, token_idx].clamp(0, N_H - 1)
+    w = pos_w[batch_idx, token_idx].clamp(0, N_W - 1)
+    values = l[batch_idx, token_idx]
+    
+    # Advanced indexing: grid[batch, :, h, w] = values
+    grid[batch_idx, :, h, w] = values
+    
+    return grid.contiguous()
+
+
 class DPTOutputAdapter(nn.Module):
     """DPT output adapter.
 

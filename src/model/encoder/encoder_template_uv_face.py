@@ -301,12 +301,12 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
         # Map the probability density to an opacity.
         return 0.5 * (1 - (1 - pdf) ** exponent + pdf ** (1 / exponent))
 
-    def _downstream_head(self, head_num, decout, img_shape, ray_embedding=None):
+    def _downstream_head(self, head_num, decout, img_shape, ray_embedding=None, pos=None):
         if head_num == 1:
             head = self.head1_template
         else:
             head = self.head2
-        return head(decout, img_shape, ray_embedding=ray_embedding)
+        return head(decout, img_shape, ray_embedding=ray_embedding, pos=pos)
 
     def filter_by_mask(self, gaussians_template, masks_template, gaussians, masks):
 
@@ -507,7 +507,7 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
         rgbs = rearrange(rgbs, "b v h w srf c -> b v (h w) srf () c").contiguous()
 
         # Encode the context images.
-        [dec_feat_template, dec_feat], [shape_template, shape], [template, images] = self.backbone(context)
+        [dec_feat_template, dec_feat], [shape_template, shape], [template, images], pose_template, pose = self.backbone(context)
 
         croco_feats = dec_feat[-1]  # (B, V, L, C_croco)
         dec_feat_for_image = list(dec_feat)  # default; replaced when fusing DINO
@@ -536,7 +536,7 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
         with torch.amp.autocast('cuda', enabled=False):
             if self.pts3d_head_type == 'dpt':
                 res1, _ = self._downstream_head(1, [tok.float() for tok in dec_feat_template] + [template],
-                                                shape_template)
+                                                shape_template, pos=pose_template)
                 if use_smplx or not self.separate_xyz_head:
                     res1['pts3d'] = res1['pts3d'][..., :3] + context["template_3d"]
                 else:
@@ -544,7 +544,7 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
                 all_mean_res = []
                 for i in range(v):
                     res2, _ = self._downstream_head(2, [tok[:, i].float() for tok in dec_feat_for_image] + [images[:, i]],
-                                                    shape[:, i])
+                                                    shape[:, i], pos=pose[:, i])
                     if use_smplx or not self.separate_xyz_head:
                         res2['pts3d'] = res2['pts3d'][..., :3]
                     else:
@@ -566,7 +566,7 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
             if self.gs_params_head_type == 'dpt_gs' or self.gs_params_head_type == 'dpt_gs_debug':
                 GS_res1 = self.gaussian_param_head_template([tok.float() for tok in dec_feat_template],
                                                             all_mean_res[0]['pts3d'].permute(0, 3, 1, 2), template,
-                                                            shape_template[0].cpu().tolist())
+                                                            shape_template[0].cpu().tolist(), pos=pose_template)
                 GS_res1 = rearrange(GS_res1, "b d h w -> b (h w) d").contiguous()
                 all_other_params = []
                 for i in range(v):
@@ -574,6 +574,7 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
                         [tok[:, i].float() for tok in dec_feat_for_image],
                         all_mean_res[i]['pts3d'].permute(0, 3, 1, 2), images[:, i, :3],
                         shape[0, i].cpu().tolist(),
+                        pos=pose[:, i],
                     )
                     GS_res2 = rearrange(GS_res2, "b d h w -> b (h w) d").contiguous()
                     all_other_params.append(GS_res2)
