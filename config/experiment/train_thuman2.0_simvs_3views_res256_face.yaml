@@ -43,6 +43,7 @@ model:
       intrinsics_embed_loc: "none"
       disable_checkpointing: true
       use_ref_mask: true  # SimVS functionality needs this to be True
+      use_uv_pe: true
 
   decoder:
     make_scale_invariant: false

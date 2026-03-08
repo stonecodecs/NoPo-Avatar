@@ -12,6 +12,7 @@ from .croco.croco import CroCoNet
 from .croco.misc import fill_default_args, freeze_all_params, transpose_to_landscape, is_symmetrized, interleave, \
     make_batch_symmetric
 from .croco.patch_embed import get_patch_embed
+from .croco.pos_embed import UVPatchPositionalEncoder
 from .backbone import Backbone
 from ....geometry.camera_emb import get_intrinsic_embedding
 
@@ -74,6 +75,10 @@ class BackboneCrocoMultiUVCfg:
     template_embed_dim: int = 1024
     disable_checkpointing: bool = False
     use_ref_mask: bool = False  # by default
+    # UV positional encoding (Mean-of-Embeddings / Integrated PE style).
+    # Output dimension matches encoder token dim; no projection. Requires context["uv_map"]
+    # (B, V, H, W, 2) and context["uv_valid"] (B, V, H, W); disabled when absent.
+    use_uv_pe: bool = False
 
 
 class AsymmetricCroCoMultiUV(CroCoNet):
@@ -95,10 +100,22 @@ class AsymmetricCroCoMultiUV(CroCoNet):
             self.intrinsics_embed_decoder_dim = (self.intrinsics_embed_degree + 1) ** 2 if self.intrinsics_embed_degree > 0 else 3
 
         self.patch_embed_cls = cfg.patch_embed_cls
-        self.croco_args = fill_default_args(croco_params[cfg.model], CroCoNet.__init__)
         self.use_ref_mask = getattr(cfg, "use_ref_mask", False)  # default; but can be overridden if context has the 'ref_mask' key
+        self.use_uv_pe = getattr(cfg, "use_uv_pe", False)
 
-        super().__init__(**croco_params[cfg.model])
+        # Build CroCo init kwargs, injecting our pos_embed mode when UV PE is enabled.
+        croco_init_params = dict(croco_params[cfg.model])
+        if self.use_uv_pe:
+            croco_init_params['pos_embed'] = 'cosine_smplx_uv'
+
+        self.croco_args = fill_default_args(croco_init_params, CroCoNet.__init__)
+
+        super().__init__(**croco_init_params)
+
+        # UV positional encoding module (output dim = enc_embed_dim, added directly to tokens).
+        if self.use_uv_pe:
+            enc_embed_dim = croco_init_params['enc_embed_dim']
+            self.uv_patch_pe = UVPatchPositionalEncoder(enc_embed_dim)
 
         if cfg.asymmetry_decoder:
             self.dec_blocks2 = deepcopy(self.dec_blocks)  # This is used in DUSt3R and MASt3R
@@ -170,13 +187,35 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         """ No prediction head """
         return
 
-    def _encode_image(self, template, template_shape, image, true_shape, intrinsics_embed=None, foreground_mask=None):
+    def _encode_image(self, template, template_shape, image, true_shape,
+                      intrinsics_embed=None, foreground_mask=None,
+                      uv_map=None, uv_valid=None):
         # embed the image into patches  (x has size B x Npatches x C)
         x, pos, attn_mask = self.patch_embed(image, true_shape=true_shape, foreground_mask=foreground_mask)
         if template.shape[1] == 24 + 3:
+            # template_attn_mask never used since we never prune it
             template, pos_template, template_attn_mask = self.patch_embed_smpl(template, true_shape=template_shape)
         else:
             template, pos_template, template_attn_mask = self.patch_embed_smplx(template, true_shape=template_shape)
+
+        # UV positional encoding — applied immediately after patch embedding, before the
+        # intrinsics token is appended, so token counts match.
+        if self.use_uv_pe:
+            if uv_map is not None:
+                # Image tokens: dynamic per-pixel UV PE (Mean-of-Embeddings / IPE).
+                # uv_map: (BV, H, W, 2), uv_valid: (BV, H, W)
+                uv_pe = self.uv_patch_pe(uv_map, uv_valid)  # (BV, N_img, enc_dim)
+                x = x + uv_pe
+
+            # Template tokens: static UV grid PE.
+            # The template is defined in UV space, so each patch covers a known UV region.
+            B_t = template.shape[0]
+            H_t = int(template_shape[0, 0].item())
+            W_t = int(template_shape[0, 1].item())
+            tmpl_uv_pe = self.uv_patch_pe.from_uv_grid(
+                H_t // 16, W_t // 16, template.device
+            )  # (1, N_t, enc_dim)
+            template = template + tmpl_uv_pe.expand(B_t, -1, -1)
 
         if intrinsics_embed is not None:
 
@@ -358,14 +397,31 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         template = rearrange(template, "b h w c -> b c h w").contiguous()
         shape_template = torch.tensor(template.shape[-2:])[None].repeat(b, 1)
 
+        # UV PE inputs — optional.  Populated from context when use_uv_pe=True and
+        # context["uv_map"] / context["uv_valid"] are provided by the dataset.
+        # Shape conventions: uv_map (B, V, H, W, 2), uv_valid (B, V, H, W) bool.
+        uv_map_bv = None
+        uv_valid_bv = None
+        if self.use_uv_pe and "uv_map" in context:
+            uv_map_bv = rearrange(context["uv_map"], "b v h w c -> (b v) h w c").contiguous()
+            uv_valid_bv = rearrange(context["uv_valid"].float(), "b v h w -> (b v) h w").contiguous()
+
         if self.disable_checkpointing:
-            feat_template, pose_template, feat, pose, enc_attn_mask = self._encode_image(template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=foreground_masks)
+            feat_template, pose_template, feat, pose, enc_attn_mask = self._encode_image(
+                template, shape_template, images_all, shape_all, intrinsic_embedding_all,
+                foreground_mask=foreground_masks, uv_map=uv_map_bv, uv_valid=uv_valid_bv,
+            )
             # feat_template: [1, N_temp, embed_dim]
             # pose_template: [1, N_temp, 2]
             # feat: [BV, N_img, embed_dim]
             # pose: [BV, N_img, 2]
         else:
-            feat_template, pose_template, feat, pose, enc_attn_mask = checkpoint.checkpoint(self._encode_image, template, shape_template, images_all, shape_all, intrinsic_embedding_all, foreground_mask=context["mask"], use_reentrant=False)
+            feat_template, pose_template, feat, pose, enc_attn_mask = checkpoint.checkpoint(
+                self._encode_image,
+                template, shape_template, images_all, shape_all, intrinsic_embedding_all,
+                foreground_mask=foreground_masks, uv_map=uv_map_bv, uv_valid=uv_valid_bv,
+                use_reentrant=False,
+            )
 
         feat = rearrange(feat, "(b v) l c -> b v l c", b=b, v=v).contiguous()
         pose = rearrange(pose, "(b v) l c -> b v l c", b=b, v=v).contiguous()

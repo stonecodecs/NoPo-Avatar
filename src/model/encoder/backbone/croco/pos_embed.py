@@ -99,9 +99,128 @@ def interpolate_pos_embed(model, checkpoint_model):
             checkpoint_model['pos_embed'] = new_pos_embed
 
 
-#----------------------------------------------------------
+# -----------------------------------------------------------------------
+# UV-space Integrated Positional Encoding (Mean-of-Embeddings / Mip-NeRF)
+# -----------------------------------------------------------------------
+
+def uv_sincos_embed(uv: torch.Tensor, embed_dim: int) -> torch.Tensor:
+    """
+    2D sin/cos positional embedding for continuous UV coordinates in [0, 1].
+
+    embed_dim must be divisible by 4: embed_dim/4 frequencies per UV axis,
+    each represented by both sin and cos (4 * D = embed_dim total).
+
+    Designed for Mean-of-Embeddings (IPE) use: average pixel embeddings per
+    patch *before* projecting so that high-frequency components attenuate
+    naturally over spatially broad or seam-spanning patches.
+
+    Args:
+        uv:        (..., 2) float tensor, UV coordinates in [0, 1].
+        embed_dim: int, output dimension; must be divisible by 4.
+    Returns:
+        (..., embed_dim) float tensor.
+    """
+    assert embed_dim % 4 == 0, f"uv_sincos_embed: embed_dim must be % 4, got {embed_dim}"
+    D = embed_dim // 4
+    # Same frequency schedule as the standard 1-D sincos PE (base = 10000).
+    omega = 1.0 / (10000.0 ** (torch.arange(D, device=uv.device, dtype=uv.dtype) / D))  # (D,)
+    u_ang = uv[..., 0:1] * omega  # (..., D)
+    v_ang = uv[..., 1:2] * omega  # (..., D)
+    return torch.cat([u_ang.sin(), u_ang.cos(), v_ang.sin(), v_ang.cos()], dim=-1)
+
+
+class UVPatchPositionalEncoder(torch.nn.Module):
+    """
+    Per-patch UV positional embeddings via Mean-of-Embeddings (Integrated PE).
+
+    For each image patch:
+    * Every pixel whose SMPL-X UV is visible is embedded with sin/cos Fourier
+      features via uv_sincos_embed (same dimension as tokens).
+    * Those per-pixel embeddings are mean-pooled.  High-frequency components
+      naturally attenuate over large or seam-spanning patches.
+    * Fully-background patches (no visible surface) fall back to a learned
+      null embedding that is distinct from any real UV point.
+
+    Usage:
+        enc = UVPatchPositionalEncoder(enc_embed_dim=1024)
+        uv_pe = enc(uv_coords, uv_valid)   # (B, N_patches, 1024)
+        x = x + uv_pe
+
+        uv_pe_tmpl = enc.from_uv_grid(n_h, n_w, device)  # (1, N_patches, 1024)
+        template = template + uv_pe_tmpl
+    """
+
+    def __init__(self, enc_embed_dim: int, patch_size: int = 16):
+        super().__init__()
+        assert enc_embed_dim % 4 == 0, f"enc_embed_dim must be divisible by 4, got {enc_embed_dim}"
+        self.enc_embed_dim = enc_embed_dim
+        self.patch_size = patch_size
+
+        # Learned null embedding for fully-background patches.
+        self.bg_embed = torch.nn.Parameter(torch.zeros(1, 1, enc_embed_dim))
+
+    def forward(self, uv_coords: torch.Tensor, uv_valid: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            uv_coords: (B, H, W, 2)  float, UV coordinates in [0, 1].
+            uv_valid:  (B, H, W)     bool or float, True/1 where pixel has visible surface.
+        Returns:
+            (B, N_patches, enc_embed_dim) positional embeddings to add to patch tokens.
+        """
+        B, H, W, _ = uv_coords.shape
+        P = self.patch_size
+        n_h, n_w = H // P, W // P
+        N = n_h * n_w
+        D = self.enc_embed_dim
+
+        with torch.no_grad():
+            # Patchify UV coords: (B, n_h, P, n_w, P, 2) → (B, N, P*P, 2)
+            uv_p = uv_coords.reshape(B, n_h, P, n_w, P, 2)
+            uv_p = uv_p.permute(0, 1, 3, 2, 4, 5).reshape(B, N, P * P, 2)
+
+            # Patchify validity: (B, n_h, P, n_w, P) → (B, N, P*P)
+            valid = uv_valid.float().reshape(B, n_h, P, n_w, P)
+            valid = valid.permute(0, 1, 3, 2, 4).reshape(B, N, P * P)
+
+            # Embed every pixel: (B, N, P*P, D). Computing inside no_grad so
+            # this large intermediate is not stored for the backward pass.
+            pixel_emb = uv_sincos_embed(uv_p, D)  # (B, N, P*P, D)
+
+            # Weighted mean pool (IPE / Mip-NeRF style): (B, N, D)
+            valid_count = valid.sum(dim=2, keepdim=True).clamp(min=1e-8)
+            patch_emb = (pixel_emb * valid.unsqueeze(-1)).sum(dim=2) / valid_count
+
+            has_any_valid = valid.sum(dim=2) > 0  # (B, N) bool
+
+        # bg_embed is a learned parameter; must stay in the autograd graph.
+        bg = self.bg_embed.expand(B, N, D)
+        patch_emb = torch.where(has_any_valid.unsqueeze(-1), patch_emb, bg)
+
+        return patch_emb  # (B, N, enc_embed_dim)
+
+    def from_uv_grid(self, n_h: int, n_w: int, device: torch.device) -> torch.Tensor:
+        """
+        UV PE for a template that is already defined in UV space.
+
+        Each of the n_h * n_w patches corresponds to one UV region of the
+        template image, so the UV coordinate is just the patch centre on a
+        uniform grid in [0, 1].
+
+        Returns:
+            (1, N_patches, enc_embed_dim) — broadcast over batch dimension.
+        """
+        with torch.no_grad():
+            ug = (torch.arange(n_h, device=device, dtype=torch.float32) + 0.5) / n_h
+            vg = (torch.arange(n_w, device=device, dtype=torch.float32) + 0.5) / n_w
+            u, v = torch.meshgrid(ug, vg, indexing='ij')
+            uv = torch.stack([u, v], dim=-1).reshape(-1, 2)
+            emb = uv_sincos_embed(uv, self.enc_embed_dim)  # (N, enc_embed_dim)
+        return emb.detach().unsqueeze(0)  # (1, N, enc_embed_dim)
+
+
+# -----------------------------------------------------------------------
 # RoPE2D: RoPE implementation in 2D
-#----------------------------------------------------------
+# -----------------------------------------------------------------------
 
 try:
     from .curope import cuRoPE2D

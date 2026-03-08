@@ -60,6 +60,12 @@ class CroCoNet(nn.Module):
             if RoPE2D is None: raise ImportError("Cannot find cuRoPE2D, please install it following the README instructions")
             freq = float(pos_embed[len('RoPE'):])
             self.rope = RoPE2D(freq=freq)
+        elif pos_embed == 'cosine_smplx_uv':
+            # UV-space PE: dynamic per-batch, computed in the backbone from SMPL-X UV coords.
+            # No static buffer, no RoPE — both are None; backbone will inject the PE itself
+            self.enc_pos_embed = None
+            self.dec_pos_embed = None
+            self.rope = None
         else:
             raise NotImplementedError('Unknown pos_embed '+pos_embed)
 
