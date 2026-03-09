@@ -806,13 +806,85 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
         return self.filter_by_mask(gaussians_template, mask_template, gaussians, mask)
 
     def get_data_shim(self) -> DataShim:
+        # Load constant mesh once for UV projection (computed on GPU in the shim, not in the dataloader).
+        _uv_mesh_cache = [None]  # mutable so inner function can assign
+
         def data_shim(batch: BatchedExample) -> BatchedExample:
             batch = apply_normalize_shim(
                 batch,
                 self.cfg.input_mean,
                 self.cfg.input_std,
             )
-
+            # Compute uv_map / uv_valid on GPU when the backbone uses UV PE and the batch has poses/cameras.
+            if (
+                getattr(self.backbone, "use_uv_pe", False)
+                and "uv_map" not in batch["context"]
+                and "Rs" in batch["context"]
+                and "Ts" in batch["context"]
+                and "extrinsics" in batch["context"]
+                and "intrinsics" in batch["context"]
+            ):
+                try:
+                    import sys
+                    from pathlib import Path
+                    from einops import rearrange
+                    repo_root = Path(__file__).resolve().parents[3]  # repo root (file is in src/model/encoder/)
+                    if str(repo_root) not in sys.path:
+                        sys.path.insert(0, str(repo_root))
+                    from smplx_uv_projection import (
+                        get_batched_image_space_uv,
+                        build_pytorch3d_cameras_from_w2c_k,
+                        load_smplx_uv_mesh_constants,
+                    )
+                    from ...misc.body_utils import apply_lbs_to_means
+                    if _uv_mesh_cache[0] is None:
+                        obj_path = repo_root / "assets" / "templates" / "smplx_uv" / "smplx_uv.obj"
+                        smplx_path = str(repo_root / "datasets" / "smplx" / "SMPLX_MALE.npz")
+                        _uv_mesh_cache[0] = load_smplx_uv_mesh_constants(obj_path, smplx_path)
+                    mesh = _uv_mesh_cache[0]
+                    if mesh is not None:
+                        vertex_np, faces_np, verts_uv_np, lbs_weights_np = mesh
+                        device = batch["context"]["image"].device
+                        B, V = batch["context"]["image"].shape[:2]
+                        H_img = batch["context"]["image"].shape[-2]
+                        W_img = batch["context"]["image"].shape[-1]
+                        vertex = torch.tensor(vertex_np, dtype=torch.float32, device=device)
+                        faces = torch.tensor(faces_np, dtype=torch.int64, device=device)
+                        verts_uv = torch.tensor(verts_uv_np, dtype=torch.float32, device=device)
+                        weights = torch.tensor(lbs_weights_np, dtype=torch.float32, device=device)
+                        Rs = batch["context"]["Rs"]   # (B, V, 55, 3, 3)
+                        Ts = batch["context"]["Ts"]   # (B, V, 55, 3)
+                        B_flat = B * V
+                        vertex_batch = vertex.unsqueeze(0).expand(B_flat, -1, -1)
+                        weights_batch = weights.unsqueeze(0).expand(B_flat, -1, -1)
+                        Rs_flat = rearrange(Rs, "b v j r c -> (b v) j r c")
+                        Ts_flat = rearrange(Ts, "b v j d -> (b v) j d")
+                        posed_flat = apply_lbs_to_means(vertex_batch, Rs_flat, Ts_flat, weights_batch)
+                        posed_vertices = rearrange(posed_flat, "(b v) n c -> b v n c", b=B, v=V)
+                        w2c = batch["context"]["extrinsics"].inverse()
+                        K = batch["context"]["intrinsics"].clone()
+                        K[:, :, 0, 0] *= W_img
+                        K[:, :, 1, 1] *= H_img
+                        K[:, :, 0, 2] *= W_img
+                        K[:, :, 1, 2] *= H_img
+                        w2c_flat = rearrange(w2c, "b v r c -> (b v) r c")
+                        K_flat = rearrange(K, "b v r c -> (b v) r c")
+                        cameras = build_pytorch3d_cameras_from_w2c_k(
+                            w2c_flat, K_flat, (H_img, W_img), device
+                        )
+                        uv_map, uv_valid = get_batched_image_space_uv(
+                            posed_vertices,
+                            faces,
+                            verts_uv,
+                            cameras,
+                            (H_img, W_img),
+                            device=device,
+                        )
+                        batch["context"]["uv_map"] = uv_map
+                        batch["context"]["uv_valid"] = uv_valid
+                except Exception as e:
+                    print(f"Error computing uv_map/uv_valid: {e}")
+                    pass
             return batch
 
         return data_shim

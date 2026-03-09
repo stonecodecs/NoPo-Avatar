@@ -204,8 +204,25 @@ class AsymmetricCroCoMultiUV(CroCoNet):
             if uv_map is not None:
                 # Image tokens: dynamic per-pixel UV PE (Mean-of-Embeddings / IPE).
                 # uv_map: (BV, H, W, 2), uv_valid: (BV, H, W)
-                uv_pe = self.uv_patch_pe(uv_map, uv_valid)  # (BV, N_img, enc_dim)
-                x = x + uv_pe
+                uv_pe_full = self.uv_patch_pe(uv_map, uv_valid)  # (BV, N_img, enc_dim)
+                if x.shape[1] == uv_pe_full.shape[1]:
+                    # No pruning: token count matches full grid.
+                    x = x + uv_pe_full
+                else:
+                    # Pruned tokens: gather UV PE by patch position so each token gets the PE for its (row, col).
+                    # pos: (BV, N', 2) patch (row, col); uv_pe_full is row-major (row, col) -> index = row * n_w + col.
+                    H, W = uv_map.shape[1], uv_map.shape[2]
+                    p_h, p_w = self.patch_embed.patch_size[0], self.patch_embed.patch_size[1]
+                    n_w = W // p_w
+                    N_img = uv_pe_full.shape[1]
+                    # token positions if we flattened 2D->1D
+                    pos_linear = (pos[:, :, 0] * n_w + pos[:, :, 1]).clamp(0, N_img - 1).long()  # (BV, N')
+                    enc_dim = uv_pe_full.shape[-1]
+                    idx = pos_linear.unsqueeze(-1).expand(-1, -1, enc_dim)  # (BV, N', enc_dim)
+                    uv_pe = torch.gather(uv_pe_full, 1, idx)  # (BV, N', enc_dim)
+                    if attn_mask is not None:
+                        uv_pe = uv_pe * attn_mask.float()
+                    x = x + uv_pe
 
             # Template tokens: static UV grid PE.
             # The template is defined in UV space, so each patch covers a known UV region.

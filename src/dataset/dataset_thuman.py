@@ -25,7 +25,7 @@ from .shims.color_jitter_shim import apply_color_jitter_shim
 from .types import Stage
 from .view_sampler import ViewSampler
 from ..misc.cam_utils import camera_normalization
-from ..misc.body_utils import get_canonical_tfms, get_canonical_global_tfms, body_pose_to_body_RTs, get_global_RTs
+from ..misc.body_utils import get_canonical_tfms, get_canonical_global_tfms, body_pose_to_body_RTs, get_global_RTs, apply_lbs_to_means
 
 
 TRAIN_FRAME_ORDERS = []
@@ -135,6 +135,7 @@ class DatasetTHuman(IterableDataset):
                 canonical_poses[0, 2] = 1.0
                 canonical_poses[0, 5] = -1.0
             self.template_tpose_joints = smplx_model(pose=canonical_poses).joints.detach().cpu()[0, :55]
+            # UV projection (uv_map / uv_valid) is computed on GPU in the encoder data shim, not in the dataloader.
 
     def shuffle(self, lst: list) -> list:
         indices = torch.randperm(len(lst))
@@ -349,6 +350,7 @@ class DatasetTHuman(IterableDataset):
                         "face_bbox": context_face_bboxes,
                         "face_conf": context_face_confs,
                         "arcface_embedding": context_arcface_embeddings, # training only (V,512)
+                        # TODO: uv maps associated with each image
                         # "canonical_vertices": example["canonical_vertex"],
                         # "canonical_lbs_weights": example["canonical_lbs_weights"],
                     },
@@ -386,6 +388,8 @@ class DatasetTHuman(IterableDataset):
                         "template_stds": self.template_stds,
                         "template_means": self.template_means,
                     })
+
+                # uv_map / uv_valid are computed on GPU in the encoder data shim (see encoder_template_uv_face.get_data_shim).
 
                 if self.cfg.load_supervision:
                     # test only; not ready

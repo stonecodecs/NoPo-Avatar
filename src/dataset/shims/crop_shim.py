@@ -264,6 +264,39 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool 
             bbox[..., 3] * scale_y + offset_y,
         ], dim=-1)
 
+    # Resize/crop uv_map and uv_valid to match image shape (same transform as image).
+    if "uv_map" in views and "uv_valid" in views:
+        uv_map = views["uv_map"]
+        uv_valid = views["uv_valid"]
+        *_, h_in, w_in = views["image"].shape
+        h_out, w_out = shape
+        if h_out <= h_in and w_out <= w_in:
+            scale_factor = min(h_out / h_in, w_out / w_in) if pad else max(h_out / h_in, w_out / w_in)
+            h_scaled = round(h_in * scale_factor)
+            w_scaled = round(w_in * scale_factor)
+            # uv_map (V, H, W, 2), uv_valid (V, H, W)
+            uv_map = F.interpolate(
+                uv_map.permute(0, 3, 1, 2), (h_scaled, w_scaled), mode="bilinear", align_corners=False
+            ).permute(0, 2, 3, 1)
+            uv_valid = F.interpolate(
+                uv_valid.unsqueeze(1).float(), (h_scaled, w_scaled), mode="nearest"
+            ).squeeze(1).bool()
+            row = (h_scaled - h_out) // 2
+            col = (w_scaled - w_out) // 2
+            uv_map = uv_map[:, row : row + h_out, col : col + w_out, :]
+            uv_valid = uv_valid[:, row : row + h_out, col : col + w_out]
+        else:
+            row = (h_out - h_in) // 2
+            col = (w_out - w_in) // 2
+            uv_map = F.pad(
+                uv_map, (0, 0, col, w_out - w_in - col, row, h_out - h_in - row), mode="constant", value=0.0
+            )
+            uv_valid = F.pad(
+                uv_valid.float(), (col, w_out - w_in - col, row, h_out - h_in - row), mode="constant", value=0.0
+            ).bool()
+        new_views["uv_map"] = uv_map
+        new_views["uv_valid"] = uv_valid
+
     return new_views
 
 

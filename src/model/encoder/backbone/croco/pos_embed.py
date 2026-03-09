@@ -188,7 +188,7 @@ class UVPatchPositionalEncoder(torch.nn.Module):
 
             # Weighted mean pool (IPE / Mip-NeRF style): (B, N, D)
             valid_count = valid.sum(dim=2, keepdim=True).clamp(min=1e-8)
-            patch_emb = (pixel_emb * valid.unsqueeze(-1)).sum(dim=2) / valid_count
+            patch_emb = (pixel_emb * valid.unsqueeze(-1)).sum(dim=2) / valid_count # (BV, N, D)
 
             has_any_valid = valid.sum(dim=2) > 0  # (B, N) bool
 
@@ -201,21 +201,30 @@ class UVPatchPositionalEncoder(torch.nn.Module):
     def from_uv_grid(self, n_h: int, n_w: int, device: torch.device) -> torch.Tensor:
         """
         UV PE for a template that is already defined in UV space.
-
-        Each of the n_h * n_w patches corresponds to one UV region of the
-        template image, so the UV coordinate is just the patch centre on a
-        uniform grid in [0, 1].
-
-        Returns:
-            (1, N_patches, enc_embed_dim) — broadcast over batch dimension.
+        
+        To maintain mathematical parity with the image branch (IPE), we
+        integrate (mean-pool) the embeddings over the area of each patch
+        instead of sampling just the center point.
         """
+        P = self.patch_size
+        H, W = n_h * P, n_w * P
+        
         with torch.no_grad():
-            ug = (torch.arange(n_h, device=device, dtype=torch.float32) + 0.5) / n_h
-            vg = (torch.arange(n_w, device=device, dtype=torch.float32) + 0.5) / n_w
-            u, v = torch.meshgrid(ug, vg, indexing='ij')
-            uv = torch.stack([u, v], dim=-1).reshape(-1, 2)
-            emb = uv_sincos_embed(uv, self.enc_embed_dim)  # (N, enc_embed_dim)
-        return emb.detach().unsqueeze(0)  # (1, N, enc_embed_dim)
+            # 1. Create a full-resolution UV grid for the template (0 to 1)
+            # Each pixel (i, j) represents the center of that pixel area.
+            u_lin = (torch.arange(H, device=device, dtype=torch.float32) + 0.5) / H
+            v_lin = (torch.arange(W, device=device, dtype=torch.float32) + 0.5) / W
+            u, v = torch.meshgrid(u_lin, v_lin, indexing='ij')
+            uv_grid = torch.stack([u, v], dim=-1).unsqueeze(0)  # (1, H, W, 2)
+            
+            # 2. Use the same logic as forward() but with all pixels valid
+            uv_valid = torch.ones((1, H, W), device=device, dtype=torch.float32)
+            
+            # We call the internal logic of forward
+            # (Alternatively, we can just call self.forward(uv_grid, uv_valid))
+            emb = self.forward(uv_grid, uv_valid)
+            
+        return emb.detach()  # (1, N_patches, enc_embed_dim)
 
 
 # -----------------------------------------------------------------------
