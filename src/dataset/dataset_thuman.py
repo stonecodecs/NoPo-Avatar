@@ -350,9 +350,13 @@ class DatasetTHuman(IterableDataset):
                         "face_bbox": context_face_bboxes,
                         "face_conf": context_face_confs,
                         "arcface_embedding": context_arcface_embeddings, # training only (V,512)
-                        # TODO: uv maps associated with each image
-                        # "canonical_vertices": example["canonical_vertex"],
-                        # "canonical_lbs_weights": example["canonical_lbs_weights"],
+                        # Per-subject identity-shaped rest-pose mesh for UV projection.
+                        # vertex is the fitted canonical mesh for this person (encodes betas implicitly).
+                        # Only included when present in the chunk (requires regenerated chunks via convert_thuman.py).
+                        **({
+                            "canonical_vertex": torch.tensor(example["vertex"], dtype=torch.float32),
+                            "canonical_lbs_weights": torch.tensor(example["lbs_weights"], dtype=torch.float32),
+                        } if "vertex" in example and "lbs_weights" in example else {}),
                     },
                     "target": {
                         "extrinsics": extrinsics[target_indices],

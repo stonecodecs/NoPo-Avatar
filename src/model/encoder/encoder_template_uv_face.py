@@ -848,15 +848,30 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
                         B, V = batch["context"]["image"].shape[:2]
                         H_img = batch["context"]["image"].shape[-2]
                         W_img = batch["context"]["image"].shape[-1]
-                        vertex = torch.tensor(vertex_np, dtype=torch.float32, device=device)
+
                         faces = torch.tensor(faces_np, dtype=torch.int64, device=device)
                         verts_uv = torch.tensor(verts_uv_np, dtype=torch.float32, device=device)
-                        weights = torch.tensor(lbs_weights_np, dtype=torch.float32, device=device)
+
+                        # Prefer per-subject identity-fitted canonical mesh from the batch.
+                        # "canonical_vertex" is the rest-pose mesh fitted to this person (betas-shaped).
+                        # Fall back to the constant OBJ template if not available.
+                        ctx_vertex = batch["context"].get("canonical_vertex", None)
+                        ctx_weights = batch["context"].get("canonical_lbs_weights", None)
+                        if ctx_vertex is not None and ctx_weights is not None:
+                            vertex = ctx_vertex.to(device).float()    # (B, N, 3)
+                            weights = ctx_weights.to(device).float()  # (B, N, J)
+                        else:
+                            vertex = torch.tensor(vertex_np, dtype=torch.float32, device=device).unsqueeze(0).expand(B, -1, -1)
+                            weights = torch.tensor(lbs_weights_np, dtype=torch.float32, device=device)
+
                         Rs = batch["context"]["Rs"]   # (B, V, 55, 3, 3)
                         Ts = batch["context"]["Ts"]   # (B, V, 55, 3)
                         B_flat = B * V
-                        vertex_batch = vertex.unsqueeze(0).expand(B_flat, -1, -1)
-                        weights_batch = weights.unsqueeze(0).expand(B_flat, -1, -1)
+                        vertex_batch = repeat(vertex, "b n c -> (b v) n c", v=V)
+                        if weights.dim() == 2:  # (N, J) constant template
+                            weights_batch = weights.unsqueeze(0).expand(B_flat, -1, -1)
+                        else:  # (B, N, J) per-subject
+                            weights_batch = repeat(weights, "b n j -> (b v) n j", v=V)
                         Rs_flat = rearrange(Rs, "b v j r c -> (b v) j r c")
                         Ts_flat = rearrange(Ts, "b v j d -> (b v) j d")
                         posed_flat = apply_lbs_to_means(vertex_batch, Rs_flat, Ts_flat, weights_batch)
