@@ -1,10 +1,12 @@
+
 defaults:
   - base_dataset
   - view_sampler: uniform
   - optional view_sampler_dataset_specific_config@view_sampler: bounded_re10k
 
 name: mvhn
-roots: [datasets/mvhn]
+# roots: [datasets/mvhn] # may not need this 
+root_dir: /workspace/datasetvol/mvhuman_data/mv_captures
 
 relative_pose: false
 make_baseline_1: false
@@ -26,3 +28,5 @@ load_supervision: false
 load_da_pose: false
 
 noise_scale: 0.0
+load_inconsistent_images: false
+vary_poses: false

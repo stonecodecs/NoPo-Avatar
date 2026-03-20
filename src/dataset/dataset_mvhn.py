@@ -8,6 +8,7 @@ import torch
 import numpy as np
 import os
 import cv2
+import json
 from torch.utils.data import Dataset
 from typing import Optional
 from dataclasses import dataclass, field
@@ -32,6 +33,11 @@ def expand_only_include(only_include):
     else:
         return only_include
 
+MISSING_SUBJECTS = "100602-100995"
+TRAIN_SUBJECTS = "100001-104500"
+VAL_SUBJECTS = "104501-104999" # rest of MVHN pt. 1
+# possibly for test, use MVHN pt. 2 (or merge this into train data later)
+
 @dataclass
 class DatasetMVHNCfg(DatasetCfgCommon):
     """Configuration for MVHumanNet dataset to match THuman interface."""
@@ -42,13 +48,17 @@ class DatasetMVHNCfg(DatasetCfgCommon):
     overfit_to_scene: str | None = None
     view_sampler: ViewSamplerCfg = None 
     name: str = "mvhn"
+    # optional jsons (lists of subject IDs) to include for the dataset (will overwrite only_include)
+    path_to_train_json: Optional[str] = None # optionals 
+    path_to_val_json: Optional[str] = None
+    path_to_test_json: Optional[str] = None
     root_dir: str = "/workspace/datasetvol/mvhuman_data/mv_captures"
     latents_dir: Optional[str] = None
     preload_path: str = "/workspace/datasetvol/mvhuman_data/preload_paths/shards"
     num_images: int = 3  # number of context views
     data_limit: Optional[int] = None
-    only_include: Optional[list] = field(default_factory=lambda: expand_only_include("100001-104500"))
-    exclude: Optional[list] = field(default_factory=lambda: expand_only_include("100602-100995"))
+    only_include: Optional[list] = field(default_factory=lambda: expand_only_include(TRAIN_SUBJECTS))
+    exclude: Optional[list] = field(default_factory=lambda: expand_only_include(MISSING_SUBJECTS))
     step_size: int = 60
     random_crop: bool = False # currently, not used, but may be in the future for data augmentation.
     maximal_crop: bool = True # this should be true by default.
@@ -204,6 +214,27 @@ class DatasetMVHN(Dataset):
             canonical_poses[0, 2] = 1.0
             canonical_poses[0, 5] = -1.0
         self.template_tpose_joints = self.smplx_model(body_pose=canonical_poses).joints.detach().cpu()[0, :55]
+
+        # train/val/test split json lists
+        try:
+            stage_json_path = None
+            if self.cfg.path_to_train_json is not None and self.stage == "train":
+                stage_json_path = self.cfg.path_to_train_json
+                self.cfg.only_include = json.load(open(self.cfg.path_to_train_json))
+            if self.cfg.path_to_val_json is not None and self.stage == "val":
+                stage_json_path = self.cfg.path_to_val_json
+                self.cfg.only_include = json.load(open(self.cfg.path_to_val_json))
+            if self.cfg.path_to_test_json is not None and self.stage == "test":
+                stage_json_path = self.cfg.path_to_test_json
+                self.cfg.only_include = json.load(open(self.cfg.path_to_test_json))
+        except FileNotFoundError as e:
+            print(f"For stage {self.stage}, no json file was found. Expected json file at {stage_json_path}. Using defaults. Error: {e}")
+            if self.stage == "train":
+                self.cfg.only_include = expand_only_include(TRAIN_SUBJECTS)
+            elif self.stage == "val" or self.stage == "test":
+                self.cfg.only_include = expand_only_include(VAL_SUBJECTS)
+            else:
+                raise ValueError(f"Invalid stage: {self.stage}. Expected train, val, or test.")
         
         # Initialize the MVHumanNet dataset
         self.dataset = MVHumanNetDataset(
