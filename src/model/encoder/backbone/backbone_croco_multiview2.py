@@ -321,7 +321,7 @@ class AsymmetricCroCoMulti2(CroCoNet):
 
         if return_pos:
             return dec_feat, shape, images, pose[:, :, :-1]
-        return [dec_feat_template, dec_feat], [shape_template, shape], [template, images]
+        return [dec_feat_template, dec_feat], [shape_template, shape], [template, images], pose_template, pose
 
     @property
     def patch_size(self) -> int:
