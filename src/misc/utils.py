@@ -36,6 +36,13 @@ def confidence_map(result):
 
 
 def get_overlap_tag(overlap):
+    """Map overlap ratio to a bucket name. Accepts a float or a 0-dim / multi-element tensor.
+
+    Per-view overlap tensors (e.g. shape [V] from dataset_thuman.build_batch_id) are reduced
+    with the mean so tagging stays well-defined when values are constant (typical placeholder zeros).
+    """
+    if isinstance(overlap, torch.Tensor):
+        overlap = float(overlap.mean() if overlap.numel() > 1 else overlap.reshape(-1)[0].item())
     if 0.05 <= overlap <= 0.3:
         overlap_tag = "small"
     elif overlap <= 0.55:

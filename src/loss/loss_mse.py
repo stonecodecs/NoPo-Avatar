@@ -35,7 +35,12 @@ class LossMse(Loss[LossMseCfg, LossMseCfgWrapper]):
         image = batch["target"]["image"] if compare_target else batch["context"]["image_gt"]
         # add mask; only consider the human region
         if self.cfg.apply_mask:
-            mask = batch["target"]["mask"] if compare_target else batch["context"]["mask"]
+            ctx = batch["context"]
+            mask = (
+                batch["target"]["mask"]
+                if compare_target
+                else ctx.get("mask_gt", ctx["mask"])
+            )
             mask = mask if image.shape[1] == mask.shape[1] else mask[:, 1:] # account for template mask concat
             mask_expanded = mask.unsqueeze(2)
             delta = (prediction.color - image) * mask_expanded

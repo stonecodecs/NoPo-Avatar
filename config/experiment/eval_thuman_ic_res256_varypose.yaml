@@ -44,7 +44,7 @@ loss:
 
 dataset:
   thuman:
-    roots: [/workspace/humanvol/thuman2.1]
+    roots: [/workspace/humanvol/thuman2.1_id_vtx]
     augment: false
     template_image_shape: [1024, 1024]
     input_image_shape: [256, 256]

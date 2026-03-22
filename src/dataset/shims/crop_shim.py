@@ -238,10 +238,13 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool 
     
     # Also resize image_gt if it exists (used for context loss)
     if "image_gt" in views:
-        # Use the same mask as image for consistency
-        image_gt, _, _, _ = rescale_and_crop(
-            views["image_gt"], views["mask"], None, views["intrinsics"], shape, pad, bgcolor)
+        # Supervision-aligned mask (mask_gt) when present; else same as input mask
+        gt_mask = views["mask_gt"] if "mask_gt" in views else views["mask"]
+        image_gt, mask_gt_out, _, _ = rescale_and_crop(
+            views["image_gt"], gt_mask, None, views["intrinsics"], shape, pad, bgcolor)
         new_views["image_gt"] = image_gt
+        if "mask_gt" in views:
+            new_views["mask_gt"] = mask_gt_out
 
     # Transform face_bbox from input image coords to resized/cropped image coords
     if "face_bbox" in views and views["face_bbox"] is not None and len(views["face_bbox"]) > 0:

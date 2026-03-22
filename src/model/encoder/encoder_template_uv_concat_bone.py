@@ -387,7 +387,7 @@ class EncoderTemplateUVConcatBone(Encoder[EncoderLBSNoPoSplatCfg]):
         rgbs = rearrange(rgbs, "b v h w srf c -> b v (h w) srf () c").contiguous()
 
         # Encode the context images.
-        [dec_feat_template, dec_feat], [shape_template, shape], [template, images] = self.backbone(context)
+        [dec_feat_template, dec_feat], [shape_template, shape], [template, images], _ ,_ = self.backbone(context)
         with torch.amp.autocast('cuda', enabled=False):
             if self.pts3d_head_type == 'dpt':
                 res1, _ = self._downstream_head(1, [tok.float() for tok in dec_feat_template] + [template],

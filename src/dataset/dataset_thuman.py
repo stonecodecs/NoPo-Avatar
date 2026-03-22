@@ -376,6 +376,7 @@ class DatasetTHuman(IterableDataset):
                 "image": context_images,
                 "image_gt": context_images_gt, # for context, need these GTs.
                 "mask": context_masks,
+                "mask_gt": context_masks,
                 "near": self.get_bound("near", len(context_indices)) / scale,
                 "far": self.get_bound("far", len(context_indices)) / scale,
                 "index": context_indices,
@@ -538,7 +539,7 @@ class DatasetTHuman(IterableDataset):
                 "cnl_Rs":      cnl_Rs_v,     # [1, J, 3, 3]
                 "cnl_Ts":      cnl_Ts_v,     # [1, J, 3]
                 "image":       scene["images"][frame_idx],
-                "image_gt":    scene["images"][frame_idx],
+                "image_gt":    scene["images"][frame_idx],  # note that GTs 
                 "mask":        scene["masks"][frame_idx],
                 "face_bbox":   face_bbox,
                 "face_conf":   face_conf,
@@ -559,30 +560,49 @@ class DatasetTHuman(IterableDataset):
         def sample_context_views(n: int) -> list[dict]:
             result = []
             for _ in range(n):
-                sk = scene_keys[torch.randint(0, n_scenes, []).item()]
-                fi = torch.randint(0, len(scenes[sk]["images"]), []).item()
+                sk = scene_keys[torch.randint(0, n_scenes, []).item()]  # which scene in shard
+                fi = torch.randint(0, len(scenes[sk]["images"]), []).item()  # which frame in scene
                 result.append(get_frame_data(scenes[sk], fi))
             return result
 
-        ctx_data = sample_context_views(num_ctx)
-        ref_idx = torch.randint(0, num_ctx, []).item()
+        ctx_data = sample_context_views(num_ctx)  # build context views with ic_images and GTs with varying keys
+        ref_idx = torch.randint(0, num_ctx, []).item()  # select reference view
         ref_mask = torch.zeros(num_ctx, dtype=torch.bool)
         ref_mask[ref_idx] = True
         ref_tpose_joints = ctx_data[ref_idx]["tpose_joints"]   # [55, 3]
-
-        # Target views: only from the same key as the reference view, other frames (exclude ref frame)
+        # Reference scene: targets and (for non-ref context) aligned cameras/GT/masks come from here.
         ref_key = ctx_data[ref_idx]["key"]
         ref_frame_idx = ctx_data[ref_idx]["frame_idx"]
         ref_scene = scenes[ref_key]
+
+        # Input-aligned masks (before SimVS overwrite): encoder / `context["image"]` use this `mask`.
+        # After sync, `d["mask"]` is ref-aligned; we keep both via `mask` vs `mask_gt`.
+        ctx_masks_input_align = [d["mask"].clone() for d in ctx_data]
+
+        # SimVS-style alignment: non-reference context slots keep their sampled input `image` (e.g. ic/relit from
+        # another key) but cameras, poses, masks, GT, etc. come from ref_scene at the same frame index so
+        # supervision and geometry match the reference identity.
+        n_ref_frames = len(ref_scene["images"])
+        if n_ref_frames < 1:  # skip sceens with only a single frame (ref frame)
+            return
+        for i in range(num_ctx):
+            if i == ref_idx:
+                continue
+            fi = int(ctx_data[i]["frame_idx"])
+            fi = min(fi, n_ref_frames - 1)
+            orig_image = ctx_data[i]["image"]
+            ctx_data[i] = get_frame_data(ref_scene, fi)
+            ctx_data[i]["image"] = orig_image
+
         n_frames = len(ref_scene["images"])
-        other_frame_indices = [i for i in range(n_frames) if i != ref_frame_idx]
+        other_frame_indices = [i for i in range(n_frames) if i != ref_frame_idx] # get all other ref images excluding ref frame
         if len(other_frame_indices) < 1:
-            return  # no other views in this scene for target
-        n_tgt_sample = min(num_tgt, len(other_frame_indices))
-        if n_tgt_sample >= num_tgt:
+            return  # no other views in this scene for target (should not happen for our datasets)
+        n_tgt_sample = min(num_tgt, len(other_frame_indices))  # select target views (or all other frames)
+        if n_tgt_sample >= num_tgt:  # if we have surplus, sample randomly
             chosen = torch.randperm(len(other_frame_indices))[:num_tgt].tolist()
             tgt_frame_indices = [other_frame_indices[i] for i in chosen]
-        else:
+        else:  # if we have less, randomly sample until we have num_tgt (will be duplicates)
             chosen = torch.randperm(len(other_frame_indices))[:n_tgt_sample].tolist()
             tgt_frame_indices = [other_frame_indices[i] for i in chosen]
             while len(tgt_frame_indices) < num_tgt:
@@ -608,7 +628,8 @@ class DatasetTHuman(IterableDataset):
         else:
             context_images_gt = context_images.clone()
 
-        context_masks = self.convert_masks([d["mask"]  for d in ctx_data])
+        context_masks = self.convert_masks(ctx_masks_input_align)
+        context_masks_gt = self.convert_masks([d["mask"] for d in ctx_data])
 
         context_face_bboxes = (
             torch.stack([d["face_bbox"] for d in ctx_data])
@@ -643,7 +664,7 @@ class DatasetTHuman(IterableDataset):
         target_cnl_Rs      = torch.cat([d["cnl_Rs"]      for d in tgt_data])
         target_cnl_Ts      = torch.cat([d["cnl_Ts"]      for d in tgt_data])
 
-        target_images  = self.convert_images([d["image"] for d in tgt_data])
+        target_images  = self.convert_images([d["image_gt"] for d in tgt_data])
         target_masks   = self.convert_masks([d["mask"]  for d in tgt_data])
 
         target_face_bboxes = (
@@ -666,8 +687,8 @@ class DatasetTHuman(IterableDataset):
             self.cfg.background_color,
         )
         context_images_gt = (
-            context_images_gt * context_masks.unsqueeze(1)
-            + bgcolor[None, :, None, None] * (1 - context_masks.unsqueeze(1))
+            context_images_gt * context_masks_gt.unsqueeze(1)
+            + bgcolor[None, :, None, None] * (1 - context_masks_gt.unsqueeze(1))
         )
 
         # ── shape check ───────────────────────────────────────────────────────
@@ -739,6 +760,7 @@ class DatasetTHuman(IterableDataset):
                 "image":       context_images,
                 "image_gt":    context_images_gt,
                 "mask":        context_masks,
+                "mask_gt":     context_masks_gt,
                 "near":        self.get_bound("near", num_ctx) / scale,
                 "far":         self.get_bound("far",  num_ctx) / scale,
                 "index":       torch.tensor([d["frame_idx"] for d in ctx_data], dtype=torch.int64),

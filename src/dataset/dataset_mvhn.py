@@ -511,6 +511,7 @@ class DatasetMVHN(Dataset):
                     "image": context_images[context_indices],  # [N, 3, H, W]
                     "image_gt": context_images_gt[context_indices], # [N, 3, H, W]
                     "mask": context_masks[context_indices],  # [N, H, W]
+                    "mask_gt": context_masks[context_indices],  # [N, H, W] (same as mask for MVHN)
                     "near": near_context[context_indices],  # [N]
                     "far": far_context[context_indices],  # [N]
                     "index": context_indices,  # [N]
