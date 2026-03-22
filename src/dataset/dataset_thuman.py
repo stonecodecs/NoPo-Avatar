@@ -579,6 +579,11 @@ class DatasetTHuman(IterableDataset):
         # After sync, `d["mask"]` is ref-aligned; we keep both via `mask` vs `mask_gt`.
         ctx_masks_input_align = [d["mask"].clone() for d in ctx_data]
 
+        # Source scene key + frame per context slot (before overwrite). Used to load per-pixel LBS supervision
+        # maps that align with `context["image"]`, not the reference identity after SimVS sync.
+        true_ctx_keys: list = []
+        true_ctx_frames: list = []
+
         # SimVS-style alignment: non-reference context slots keep their sampled input `image` (e.g. ic/relit from
         # another key) but cameras, poses, masks, GT, etc. come from ref_scene at the same frame index so
         # supervision and geometry match the reference identity.
@@ -586,6 +591,8 @@ class DatasetTHuman(IterableDataset):
         if n_ref_frames < 1:  # skip sceens with only a single frame (ref frame)
             return
         for i in range(num_ctx):
+            true_ctx_keys.append(ctx_data[i]["key"])
+            true_ctx_frames.append(int(ctx_data[i]["frame_idx"]))
             if i == ref_idx:
                 continue
             fi = int(ctx_data[i]["frame_idx"])
@@ -807,12 +814,13 @@ class DatasetTHuman(IterableDataset):
                 "template_means":       self.template_means,
             })
 
-        # lbs_weights_supervisions: one dir per scene key (0000, 0063, ...); load per view in same order as images
+        # lbs_weights_supervisions: per-pixel maps aligned with `context["image"]` — use source key/frame
+        # (true_ctx_*), not post-overwrite ctx_data (which would incorrectly load reference LBS for non-ref views).
         if self.cfg.load_lbs_weights and self.stage == "train":
             lbs_ctx = []
-            for d in ctx_data:
-                scene_key = d["key"]
-                frame_idx = d["frame_idx"]
+            for i in range(num_ctx):
+                scene_key = true_ctx_keys[i]
+                frame_idx = true_ctx_frames[i]
                 lbs_dir = self.cfg.roots[0] / "lbs_weights_supervisions" / scene_key
                 fname = f"frame_{TRAIN_FRAME_ORDERS[frame_idx]:06d}"
                 if (lbs_dir / f"{fname}.npy").exists():

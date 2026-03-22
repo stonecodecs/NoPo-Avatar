@@ -36,12 +36,14 @@ class LossLBSWeights(Loss[LossLBSWeightsCfg, LossLBSWeightsCfgWrapper]):
         gaussians: Gaussians,
         global_step: int,
     ) -> Float[Tensor, ""]:
-        if "lbs_weights" not in batch["context"]:
-            return torch.tensor(0.0, device=batch["context"]["mask"].device)
+        ctx = batch["context"]
+        if "lbs_weights" not in ctx:
+            return torch.tensor(0.0, device=ctx["mask"].device)
 
-        b, v, h, w = batch["context"]["mask_gt"].shape
-        gt_lbs_weights = rearrange(batch["context"]["lbs_weights"], "b v h w c -> b (v h w) c")
-        valid_mask = (torch.sum(gt_lbs_weights, dim=-1) > 0) * batch["context"]["mask_gt"].reshape(b, -1)
+        # Per-pixel GT maps follow `context["image"]` (source identity); use input-aligned `mask`, not `mask_gt`.
+        b, v, h, w = ctx["mask"].shape
+        gt_lbs_weights = rearrange(ctx["lbs_weights"], "b v h w c -> b (v h w) c")
+        valid_mask = (torch.sum(gt_lbs_weights, dim=-1) > 0) * ctx["mask"].reshape(b, -1)
         gt_lbs_weights = F.normalize(gt_lbs_weights.clip(min=0), dim=-1)
         pred_lbs_weights = gaussians.lbs_weights
         # import pdb; pdb.set_trace()
