@@ -10,7 +10,7 @@ import torchvision.transforms.functional as tvf
 from torchvision.transforms import InterpolationMode
 import random
 
-from ..types import AnyExample, AnyViews
+from ..types import AnyExample, AnyViews, Callable
 
 
 def rescale(
@@ -219,14 +219,129 @@ def rescale_and_crop(
     else:
         return center_crop(images, masks, lbs_weights, intrinsics, shape)
 
+def apply_bbox_crop_to_views(
+    views: AnyViews,
+    crop_params_list: list[tuple[int, int, int, int]],
+    target_shape: tuple[int, int],
+) -> AnyViews:
+    """
+    Crop each view using a pre-specified (top, left, crop_h, crop_w) bbox and resize to
+    target_shape.  All spatial tensors (image, mask, image_gt, lbs_weights, uv_map,
+    uv_valid) are cropped in the same way.  Intrinsics and face_bbox are updated
+    analytically.
+
+    Args:
+        views: dict of view tensors, images expected as (V, C, H, W).
+        crop_params_list: list of (top, left, ch, cw) per view, len == V.
+        target_shape: (h_out, w_out) to resize each crop to.
+    """
+    h_out, w_out = target_shape
+    images = views["image"]        # (V, C, H, W)
+    masks = views["mask"]          # (V, H, W)
+    V, C, H, W = images.shape
+
+    assert len(crop_params_list) == V, (
+        f"crop_params_list has {len(crop_params_list)} entries but there are {V} views"
+    )
+
+    def _crop_resize_chw(t_chw: torch.Tensor, top: int, left: int, ch: int, cw: int) -> torch.Tensor:
+        """Crop a (C, H, W) tensor and resize to (h_out, w_out)."""
+        t = t_chw[:, top:top + ch, left:left + cw].unsqueeze(0).float()  # (1, C, ch, cw)
+        return F.interpolate(t, (h_out, w_out), mode="bilinear", align_corners=False).squeeze(0)
+
+    def _crop_resize_hw(t_hw: torch.Tensor, top: int, left: int, ch: int, cw: int) -> torch.Tensor:
+        """Crop a (H, W) tensor and resize to (h_out, w_out) with nearest-neighbour."""
+        t = t_hw[top:top + ch, left:left + cw].unsqueeze(0).unsqueeze(0).float()
+        return F.interpolate(t, (h_out, w_out), mode="nearest").squeeze(0).squeeze(0)
+
+    imgs_out, masks_out = [], []
+    for i, (top, left, ch, cw) in enumerate(crop_params_list):
+        imgs_out.append(_crop_resize_chw(images[i], top, left, ch, cw))
+        masks_out.append(_crop_resize_hw(masks[i], top, left, ch, cw))
+
+    new_views: AnyViews = {
+        **views,
+        "image": torch.stack(imgs_out),
+        "mask": torch.stack(masks_out),
+    }
+
+    # image_gt (same crop as image)
+    if "image_gt" in views:
+        imgs_gt_out = []
+        for i, (top, left, ch, cw) in enumerate(crop_params_list):
+            imgs_gt_out.append(_crop_resize_chw(views["image_gt"][i], top, left, ch, cw))
+        new_views["image_gt"] = torch.stack(imgs_gt_out)
+
+    # lbs_weights: (V, H, W, D)
+    if "lbs_weights" in views and views["lbs_weights"] is not None:
+        lbs = views["lbs_weights"]  # (V, H, W, D)
+        D = lbs.shape[-1]
+        lbs_out = []
+        for i, (top, left, ch, cw) in enumerate(crop_params_list):
+            t = lbs[i, top:top + ch, left:left + cw, :].permute(2, 0, 1).unsqueeze(0).float()
+            t = F.interpolate(t, (h_out, w_out), mode="bilinear", align_corners=False)
+            lbs_out.append(t.squeeze(0).permute(1, 2, 0))  # (h_out, w_out, D)
+        new_views["lbs_weights"] = torch.stack(lbs_out)
+
+    # uv_map: (V, H, W, 2) / uv_valid: (V, H, W)
+    if "uv_map" in views and "uv_valid" in views:
+        uv_map_out, uv_valid_out = [], []
+        uv_map = views["uv_map"]
+        uv_valid = views["uv_valid"]
+        for i, (top, left, ch, cw) in enumerate(crop_params_list):
+            um = uv_map[i, top:top + ch, left:left + cw, :].permute(2, 0, 1).unsqueeze(0).float()
+            um = F.interpolate(um, (h_out, w_out), mode="bilinear", align_corners=False)
+            uv_map_out.append(um.squeeze(0).permute(1, 2, 0))
+
+            uv_v = uv_valid[i, top:top + ch, left:left + cw].unsqueeze(0).unsqueeze(0).float()
+            uv_v = F.interpolate(uv_v, (h_out, w_out), mode="nearest").squeeze(0).squeeze(0).bool()
+            uv_valid_out.append(uv_v)
+        new_views["uv_map"] = torch.stack(uv_map_out)
+        new_views["uv_valid"] = torch.stack(uv_valid_out)
+
+    # Intrinsics (normalized): fx_new = fx * W / cw, cx_new = (cx * W - left) / cw
+    intrinsics = views["intrinsics"].clone()  # (V, 3, 3)
+    orig_K = views["intrinsics"]
+    for i, (top, left, ch, cw) in enumerate(crop_params_list):
+        # Safety floor for ch/cw to avoid zero division.
+        cw = max(cw, 1)
+        ch = max(ch, 1)
+        intrinsics[i, 0, 0] = orig_K[i, 0, 0] * W / cw
+        intrinsics[i, 1, 1] = orig_K[i, 1, 1] * H / ch
+        intrinsics[i, 0, 2] = (orig_K[i, 0, 2] * W - left) / cw
+        intrinsics[i, 1, 2] = (orig_K[i, 1, 2] * H - top) / ch
+    new_views["intrinsics"] = intrinsics
+
+    # face_bbox: (V, 4) x1,y1,x2,y2 in original image pixel coords → output pixel coords
+    if "face_bbox" in views and views["face_bbox"] is not None and len(views["face_bbox"]) > 0:
+        bboxes = views["face_bbox"].float()  # (V, 4)
+        new_bboxes = []
+        for i, (top, left, ch, cw) in enumerate(crop_params_list):
+            cw = max(cw, 1)
+            ch = max(ch, 1)
+            sx = w_out / cw
+            sy = h_out / ch
+            b = bboxes[i]
+            new_bboxes.append(torch.stack([
+                (b[0] - left) * sx,
+                (b[1] - top) * sy,
+                (b[2] - left) * sx,
+                (b[3] - top) * sy,
+            ]))
+        new_views["face_bbox"] = torch.stack(new_bboxes)
+
+    return new_views
+
 
 def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool = False, bgcolor: torch.Tensor | None = None) -> AnyViews:
     if "lbs_weights" in views and views["lbs_weights"].shape[-3:-1] != shape:
         lbs_weights = views["lbs_weights"]
     else:
         lbs_weights = None
+
     images, masks, lbs_weights, intrinsics = rescale_and_crop(
-        views["image"], views["mask"], lbs_weights, views["intrinsics"], shape, pad, bgcolor)
+            views["image"], views["mask"], lbs_weights, views["intrinsics"], shape, pad, bgcolor)
+        
     new_views = {
         **views,
         "image": images,
@@ -303,11 +418,26 @@ def apply_crop_shim_to_views(views: AnyViews, shape: tuple[int, int], pad: bool 
     return new_views
 
 
-def apply_crop_shim(example: AnyExample, shape: tuple[int, int], pad: bool = False) -> AnyExample:
-    """Crop images in the example."""
+def apply_crop_shim(
+    example: AnyExample,
+    shape: tuple[int, int],
+    pad: bool = False,
+    context_bbox_crops: list[tuple[int, int, int, int]] | None = None,
+) -> AnyExample:
+    """Crop images in the example.
+
+    When context_bbox_crops is provided (a list of (top, left, ch, cw) per context
+    view), context views are cropped via apply_bbox_crop_to_views and then the result
+    is returned at 'shape' resolution.  Target views always receive the standard
+    center-rescale crop so their camera geometry is undisturbed.
+    """
+    if context_bbox_crops is not None:
+        context_views = apply_bbox_crop_to_views(example["context"], context_bbox_crops, shape)
+    else:
+        context_views = apply_crop_shim_to_views(example["context"], shape, pad, example["bgcolor"])
     return {
         **example,
-        "context": apply_crop_shim_to_views(example["context"], shape, pad, example["bgcolor"]),
+        "context": context_views,
         "target": apply_crop_shim_to_views(example["target"], shape, pad, example["bgcolor"]),
     }
 

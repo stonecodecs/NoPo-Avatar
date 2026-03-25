@@ -56,7 +56,9 @@ class DatasetTHumanCfg(DatasetCfgCommon):
     sample_rate: float = 1.0
     noise_scale: float = 0.0
     load_inconsistent_images: bool = False
-    vary_poses : bool = False  # if True, uses different body poses for each context view
+    vary_poses: bool = False  # if True, uses different body poses for each context view
+    crop_annotations_path: str | None = None
+    crops_json: str | None = None  # path to bbox crops (for cropped dataset to test edge cases)
 
 
 @dataclass
@@ -98,6 +100,14 @@ class DatasetTHuman(IterableDataset):
             chunk_path = self.index[self.cfg.overfit_to_scene]
             self.chunks = [chunk_path] * len(self.chunks)
 
+        # (used for static crop evaluation)
+        self.crop_annotations: dict | None = None
+        crops_path = cfg.crop_annotations_path or cfg.crops_json
+        if crops_path is not None and crops_path != "":
+            print(f"[DatasetTHuman] Loading crop annotations from {crops_path}")
+            with open(crops_path, "r") as f:
+                self.crop_annotations = json.load(f)
+
         template_shape = cfg.template_image_shape[0]
         if self.cfg.load_template_uv:
             if self.cfg.load_da_pose:
@@ -137,6 +147,89 @@ class DatasetTHuman(IterableDataset):
                 canonical_poses[0, 5] = -1.0
             self.template_tpose_joints = smplx_model(pose=canonical_poses).joints.detach().cpu()[0, :55]
             # UV projection (uv_map / uv_valid) is computed on GPU in the encoder data shim, not in the dataloader.
+
+    def adjust_for_crop():
+        """
+        If cropping is enabled, ensure that context images are adjusted,
+        intrinsics, and LBS maps. Target images should remain canonical, full body views.
+        """
+        pass
+
+    def _pick_crop_params(self, crop_options: list) -> tuple[int, int, int, int] | None:
+        """Pick one crop option and return (top, left, crop_h, crop_w)."""
+        if not crop_options:
+            return None
+        if self.stage == "train":
+            chosen = crop_options[torch.randint(0, len(crop_options), []).item()]
+        else:
+            chosen = crop_options[0]
+
+        if "bbox" in chosen:
+            x1, y1, x2, y2 = chosen["bbox"]
+            left, top = int(round(x1)), int(round(y1))
+            cw, ch = int(round(x2 - x1)), int(round(y2 - y1))
+        else:
+            return None
+
+        # Safety floor to avoid zero division or empty crops
+        cw = max(cw, 8)
+        ch = max(ch, 8)
+
+        return (top, left, ch, cw)
+
+    def _get_context_bbox_crops(
+        self,
+        scene: str,
+        context_indices: torch.Tensor,
+    ) -> list[tuple[int, int, int, int]] | None:
+        """
+        Look up pre-computed crop params for context views of a single scene.
+
+        Returns a list of (top, left, crop_h, crop_w) tuples, one per context view,
+        or None if crop annotations are not available / indices are out of range.
+        """
+        if self.crop_annotations is None:
+            return None
+        scene_crops = self.crop_annotations.get(scene)
+        if scene_crops is None:
+            return None
+
+        crop_params_list = []
+        for idx in context_indices:
+            view_idx = idx.item()
+            if view_idx >= len(scene_crops):
+                return None
+            params = self._pick_crop_params(scene_crops[view_idx])
+            if params is None:
+                return None
+            crop_params_list.append(params)
+        return crop_params_list
+
+    def _get_context_bbox_crops_multi(
+        self,
+        scene_view_pairs: list[tuple[str, int]],
+    ) -> list[tuple[int, int, int, int]] | None:
+        """
+        Look up pre-computed crop params for context views that may span multiple scenes.
+
+        Args:
+            scene_view_pairs: list of (scene_key, view_idx) per context view.
+
+        Returns a list of (top, left, crop_h, crop_w) or None if unavailable.
+        """
+        if self.crop_annotations is None:
+            return None
+
+        crop_params_list = []
+        for scene_key, view_idx in scene_view_pairs:
+            scene_crops = self.crop_annotations.get(scene_key)
+            if scene_crops is None or view_idx >= len(scene_crops):
+                return None
+            params = self._pick_crop_params(scene_crops[view_idx])
+            if params is None:
+                return None
+            crop_params_list.append(params)
+        return crop_params_list
 
     def shuffle(self, lst: list) -> list:
         indices = torch.randperm(len(lst))
@@ -342,7 +435,7 @@ class DatasetTHuman(IterableDataset):
             )
             return None
 
-        # Resize the world to make the baseline 1.
+        # Resize the world to make the baseline 1 (optional, but not used.)
         context_extrinsics = extrinsics[context_indices]
         if self.cfg.make_baseline_1:
             a, b = context_extrinsics[0, :3, 3], context_extrinsics[-1, :3, 3]
@@ -463,7 +556,12 @@ class DatasetTHuman(IterableDataset):
             example = apply_augmentation_shim(example)
             if self.cfg.augment_color_jitter:
                 example = apply_color_jitter_shim(example)
-        shimmed_data = apply_crop_shim(example, tuple(self.cfg.input_image_shape))
+
+        context_bbox_crops = self._get_context_bbox_crops(scene, context_indices)
+        shimmed_data = apply_crop_shim(
+            example, tuple(self.cfg.input_image_shape),
+            context_bbox_crops=context_bbox_crops,
+        )
         yield shimmed_data
 
     def build_batch_id(self, meta_example: dict):
@@ -846,7 +944,14 @@ class DatasetTHuman(IterableDataset):
             example = apply_augmentation_shim(example)
             if self.cfg.augment_color_jitter:
                 example = apply_color_jitter_shim(example)
-        shimmed_data = apply_crop_shim(example, tuple(self.cfg.input_image_shape))
+
+        # Context views in build_batch_id can come from different scenes.
+        ctx_scene_view_pairs = [(d["key"], d["frame_idx"]) for d in ctx_data]
+        context_bbox_crops = self._get_context_bbox_crops_multi(ctx_scene_view_pairs)
+        shimmed_data = apply_crop_shim(
+            example, tuple(self.cfg.input_image_shape),
+            context_bbox_crops=context_bbox_crops,
+        )
         yield shimmed_data
 
     def convert_poses(
