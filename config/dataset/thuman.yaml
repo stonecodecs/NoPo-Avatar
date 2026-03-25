@@ -29,3 +29,4 @@ noise_scale: 0.0
 load_inconsistent_images: false
 vary_poses: false
 crops_json: ""
+crop_annotations_path: null

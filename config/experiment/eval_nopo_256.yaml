@@ -1,22 +1,25 @@
 # @package _global_
+# Base eval config for 256×256 resolution checkpoints (template_uv_concat_bone encoder).
+# Dataset roots, checkpoints, and variant flags (IC / crop / varypose) are injected
+# by run_eval.py so this YAML only captures the model architecture.
 
 defaults:
-  - /dataset@_group_.thuman: thuman  # keep; xhuman and thuman use the same dataset logic
+  - /dataset@_group_.thuman: thuman
   - override /model/encoder: template_uv_concat_bone
   - override /model/encoder/backbone: croco_multi2
   - override /model/decoder: lbs_splatting_cuda
   - override /loss: [mse, lpips, chamfer, projection, lbs_weights]
 
 wandb:
-  name: nopo_eval_xhuman_vanilla
-  tags: [thuman2.1, 256x256]
+  name: eval_nopo_256
+  tags: [eval, 256x256]
 
 model:
   encoder:
     pose_free: true
     intrinsics_embed_loc: encoder
     intrinsics_embed_type: token
-    pretrained_weights: 'checkpoint/thuman2.0_inputs3_res1024_iter50000.ckpt'
+    pretrained_weights: null
 
     apply_mask: "soft"
     direct_rgbs: false
@@ -24,9 +27,9 @@ model:
     backbone:
       template_encoder_free: true
       template_image_size: [1024, 1024]
+      use_ref_mask: false
       intrinsics_embed_loc: "none"
       disable_checkpointing: true
-      use_ref_mask: false  # SimVS functionality needs this to be True
 
   decoder:
     make_scale_invariant: false
@@ -42,28 +45,23 @@ loss:
   lbs_weights:
     weight: 0.01
 
-  mse:
-    apply_mask: true
-
 dataset:
   thuman:
-    roots: [datasets/xhuman]
-    augment: true
+    # roots / index_path / background_color injected by run_eval.py
+    augment: false
     template_image_shape: [1024, 1024]
-    input_image_shape: [1024, 1024]
+    input_image_shape: [256, 256]
     original_image_shape: [1024, 1024]
     load_template_uv: true
-    load_lbs_weights: true
-    background_color: [-1, -1, -1]
+    load_lbs_weights: false
+    # variant flags — overridden by run_eval.py per experiment
+    load_inconsistent_images: false
+    vary_poses: false
 
     view_sampler:
       num_context_views: 3
       num_target_views: 4
       warm_up_steps: 150_000
-
-    ## SimVS needs this to be True
-    load_inconsistent_images: false  # if enabled, we use inconsistent images for context views for all non-reference views
-    crop_annotations_path: '/workspace/NoPo-Avatar/crop_annotations.json'
 
 optimizer:
   lr: 1e-4
@@ -73,6 +71,8 @@ optimizer:
 data_loader:
   train:
     batch_size: 1
+    num_workers: 4
+  test:
     num_workers: 1
 
 trainer:
