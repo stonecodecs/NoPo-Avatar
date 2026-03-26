@@ -30,3 +30,4 @@ load_inconsistent_images: false
 vary_poses: false
 crops_json: ""
 crop_annotations_path: null
+consistent_set_prob: 0.0  # probability of using consistent set for context views (if load_inconsistent_images is True, otherwise no effect.)

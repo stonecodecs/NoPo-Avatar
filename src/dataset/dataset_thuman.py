@@ -59,6 +59,7 @@ class DatasetTHumanCfg(DatasetCfgCommon):
     vary_poses: bool = False  # if True, uses different body poses for each context view
     crop_annotations_path: str | None = None
     crops_json: str | None = None  # path to bbox crops (for cropped dataset to test edge cases)
+    consistent_set_prob: float = 0.2  # probability of using consistent set for context views (if load_inconsistent_images is True, otherwise no effect.)
 
 
 @dataclass
@@ -397,7 +398,7 @@ class DatasetTHuman(IterableDataset):
         ref_mask[torch.randint(0, len(context_indices), [1])] = True
 
         # load inconsistent images for context views for all non-reference views
-        if self.cfg.load_inconsistent_images and "ic_images" in example:
+        if self.cfg.load_inconsistent_images and "ic_images" in example and np.random.rand() < self.cfg.consistent_set_prob:
             # for now, these share the same masks as context images (possibly change later)
             ic_images = [
                 example["ic_images"][index.item()] for index in context_indices
@@ -407,8 +408,9 @@ class DatasetTHuman(IterableDataset):
             context_images = torch.stack([context_images[i] if ref_mask[i] else ic_images[i] for i in range(len(context_indices))])
             del ic_images
             # if we ever train on inconsistent POSES, then need a separate 'ic_masks' key for these
-        elif self.cfg.load_inconsistent_images:
+        elif self.cfg.load_inconsistent_images == False:
             print(f"[DEBUG] load_inconsistent_images=True but 'ic_images' not found in example for scene {scene}")
+        # else: consistent set is used
 
         # Skip the example if the images don't have the right shape.
         context_image_invalid = context_images.shape[1:] != (3, *self.cfg.original_image_shape)

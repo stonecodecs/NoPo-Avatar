@@ -57,7 +57,7 @@ loss:
 
 dataset:
   thuman:
-    roots: [datasets/xhuman]
+    roots: [datasets/thuman2.1_lbm]
     augment: true
 #    template_image_shape: [1024, 1024]
     template_image_shape: [512, 512]
@@ -73,7 +73,7 @@ dataset:
 
     ## SimVS needs this to be True
     load_inconsistent_images: true  # if enabled, we use inconsistent images for context views for all non-reference views
-    crop_annotations_path: '/workspace/NoPo-Avatar/crop_annotations.json'
+    # crop_annotations_path: '/workspace/NoPo-Avatar/crop_annotations.json'
 
 optimizer:
   lr: 1e-4
