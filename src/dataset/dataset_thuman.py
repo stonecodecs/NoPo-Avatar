@@ -398,7 +398,7 @@ class DatasetTHuman(IterableDataset):
         ref_mask[torch.randint(0, len(context_indices), [1])] = True
 
         # load inconsistent images for context views for all non-reference views
-        if self.cfg.load_inconsistent_images and "ic_images" in example and np.random.rand() < self.cfg.consistent_set_prob:
+        if self.cfg.load_inconsistent_images and "ic_images" in example and np.random.rand() > self.cfg.consistent_set_prob:
             # for now, these share the same masks as context images (possibly change later)
             ic_images = [
                 example["ic_images"][index.item()] for index in context_indices
