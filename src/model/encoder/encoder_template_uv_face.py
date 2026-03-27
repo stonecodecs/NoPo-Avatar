@@ -867,11 +867,26 @@ class EncoderTemplateUVFace(Encoder[EncoderLBSNoPoSplatFaceCfg]):
                         Rs = batch["context"]["Rs"]   # (B, V, 55, 3, 3)
                         Ts = batch["context"]["Ts"]   # (B, V, 55, 3)
                         B_flat = B * V
-                        vertex_batch = repeat(vertex, "b n c -> (b v) n c", v=V)
+                        # Per-batch mesh: (B, N, 3) — repeat across views.
+                        # Varypose / ID-grouped batches: (B, V, N, 3) — one mesh per view (already expanded).
+                        if vertex.dim() == 3:
+                            vertex_batch = repeat(vertex, "b n c -> (b v) n c", v=V)
+                        elif vertex.dim() == 4:
+                            vertex_batch = rearrange(vertex, "b v n c -> (b v) n c")
+                        else:
+                            raise ValueError(
+                                f"canonical_vertex must be (B,N,3) or (B,V,N,3); got {tuple(vertex.shape)}"
+                            )
                         if weights.dim() == 2:  # (N, J) constant template
                             weights_batch = weights.unsqueeze(0).expand(B_flat, -1, -1)
-                        else:  # (B, N, J) per-subject
+                        elif weights.dim() == 3:  # (B, N, J) per-subject
                             weights_batch = repeat(weights, "b n j -> (b v) n j", v=V)
+                        elif weights.dim() == 4:  # (B, V, N, J) per-view (varypose stacks)
+                            weights_batch = rearrange(weights, "b v n j -> (b v) n j")
+                        else:
+                            raise ValueError(
+                                f"canonical_lbs_weights must be (N,J), (B,N,J), or (B,V,N,J); got {tuple(weights.shape)}"
+                            )
                         Rs_flat = rearrange(Rs, "b v j r c -> (b v) j r c")
                         Ts_flat = rearrange(Ts, "b v j d -> (b v) j d")
                         posed_flat = apply_lbs_to_means(vertex_batch, Rs_flat, Ts_flat, weights_batch)

@@ -38,12 +38,11 @@ model:
 
     backbone:
       template_encoder_free: true
-#      template_image_size: [1024, 1024]
       template_image_size: [256, 256]
       intrinsics_embed_loc: "none"
       disable_checkpointing: true
       use_ref_mask: true  # SimVS functionality needs this to be True
-      use_uv_pe: true
+      use_uv_pe: false
 
   decoder:
     make_scale_invariant: false
@@ -74,10 +73,10 @@ loss:
 
 dataset:
   thuman:
-    roots: [datasets/thuman2.1_arcface]
+    roots: [datasets/thuman2.1_lbm]
     augment: true
-#    template_image_shape: [1024, 1024]
     template_image_shape: [256, 256]
+    original_image_shape: [1024, 1024]
     input_image_shape: [256, 256]
     load_template_uv: true
     load_lbs_weights: true
@@ -90,6 +89,8 @@ dataset:
 
     ## SimVS needs this to be True
     load_inconsistent_images: true  # if enabled, we use inconsistent images for context views for all non-reference views
+    crop_annotations_path: null
+    consistent_set_prob: 0.20
 
 optimizer:
   lr: 1e-4
