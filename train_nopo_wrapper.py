@@ -327,6 +327,10 @@ def build_overrides(
             overrides.append(f"data_loader.train.{key}={val}")
         elif key == "consistent_set_prob":
             overrides.append(f"dataset.{dkey}.consistent_set_prob={val}")
+        elif key == "output_path":
+            overrides.append(f"hydra.run.dir={val}")
+        elif key == "checkpoint":
+            overrides.append(f"checkpointing.load={val}")
         else:
             overrides.append(ovr)
     overrides.append(f"wandb.tags={tags}")
