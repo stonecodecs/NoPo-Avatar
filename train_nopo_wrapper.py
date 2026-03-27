@@ -30,6 +30,7 @@ Datasets
 
 Ablations  (can be combined)
     none           Original NoPo-Avatar  (croco_multi2 backbone, no UV-PE, no face loss)
+    faceloss       Face loss enabled (template_uv_face + croco_multi2, DINO face encoder off)
     face_encoder   Face encoder (DINOv2 FPN on face crop; unused now, but maybe a comeback in the future.)
     uvpe           UV positional encoding (croco_uv backbone, face loss enabled)
     sla            Structured local attention  [not yet implemented — reserved]
@@ -47,6 +48,13 @@ from pathlib import Path
 from typing import List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent
+
+# temporary checkpoints
+CHECKPOINTS = {
+    "vanilla": "/workspace/NoPo-Avatar/checkpoint/thuman2.1_inputs3_res1024_iter50000.ckpt",
+    "uvpe_base": "/workspace/humanvol/nopo_train_face_uvpe/epoch_18-step_15000.ckpt",
+    
+}
 
 
 # ─── Dataset Registry ─────────────────────────────────────────────────────────
@@ -140,6 +148,13 @@ ABLATIONS: dict[str, AblationSpec] = {
         loss_list=["mse", "lpips", "chamfer", "projection", "lbs_weights"],
         extra_backbone_overrides={"use_ref_mask": "true"},
     ), # not 'vanilla' since it uses refmask, but this makes more sense for 'training'
+    "faceloss": AblationSpec(
+        description="Face loss only (no UV-PE, no body loss)",
+        encoder="template_uv_face",
+        backbone="croco_multi2",
+        loss_list=["mse", "lpips", "chamfer", "projection", "lbs_weights", "faceloss"],
+        extra_backbone_overrides={"use_ref_mask": "true"},
+    ),
     "face_encoder": AblationSpec(
         description="Face encoder (DINOv2 FPN on face crop)",
         encoder="template_uv_face",
@@ -176,6 +191,7 @@ ABLATIONS: dict[str, AblationSpec] = {
 # we build upon these experiments for the
 BASE_EXPERIMENTS: dict[tuple[str, str], str] = {
     ("THuman",     "none"): "train_thuman2.0_simvs_3views_res256_face",  # 'none' means consistent set, but we still used this config
+    ("THuman",     "faceloss"): "train_thuman2.0_simvs_3views_res256_face",
     ("THuman",     "uvpe"): "train_thuman2.0_simvs_3views_res256_face",  # this will be the main experiment for all else
     # not fully implemented yet, so below are TODO
     ("MVHumanNet", "none"): "train_mvhn_simvs_3views_res512",
@@ -285,7 +301,7 @@ def build_overrides(
     if primary_ablation in ABLATIONS:
         _append_ablation_spec(overrides, ABLATIONS[primary_ablation])
 
-    if "face_encoder" not in ablations:
+    if primary_ablation != "none" and "face_encoder" not in ablations:
         # unless explicitly stated, we don't use face encoder
         # this is needed since template_uv_face defaults to using it.
         overrides.append("model.encoder.face_encoder_cfg=null")
@@ -366,7 +382,7 @@ def main() -> None:
         "--ablations", "-a",
         nargs="+",
         default=["none"],
-        choices=["none", "uvpe", "sla", "face_encoder", "all"],
+        choices=["none", "faceloss", "uvpe", "sla", "face_encoder", "all"],
         help="Model ablations to enable (none = original NoPo-Avatar).",
     )
     parser.add_argument(
