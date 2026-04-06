@@ -60,6 +60,9 @@ class DatasetTHumanCfg(DatasetCfgCommon):
     crop_annotations_path: str | None = None
     crops_json: str | None = None  # path to bbox crops (for cropped dataset to test edge cases)
     consistent_set_prob: float = 0.2  # probability of using consistent set for context views (if load_inconsistent_images is True, otherwise no effect.)
+    random_crop: bool = False
+    random_crop_prob: float = 0.67  # if random_crop: per-context-view probability of random square crop (else center)
+    min_crop_ratio: float = 0.3  # smallest crop size as fraction of image shape short side
 
 
 @dataclass
@@ -563,6 +566,9 @@ class DatasetTHuman(IterableDataset):
         shimmed_data = apply_crop_shim(
             example, tuple(self.cfg.input_image_shape),
             context_bbox_crops=context_bbox_crops,
+            random_square_crop=self.cfg.random_crop,
+            random_square_crop_prob=self.cfg.random_crop_prob if self.cfg.random_crop else None,
+            random_square_crop_kwargs={"min_crop_ratio": self.cfg.min_crop_ratio},
         )
         yield shimmed_data
 
@@ -953,6 +959,9 @@ class DatasetTHuman(IterableDataset):
         shimmed_data = apply_crop_shim(
             example, tuple(self.cfg.input_image_shape),
             context_bbox_crops=context_bbox_crops,
+            random_square_crop=self.cfg.random_crop,
+            random_square_crop_prob=self.cfg.random_crop_prob if self.cfg.random_crop else None,
+            random_square_crop_kwargs={"min_crop_ratio": self.cfg.min_crop_ratio},
         )
         yield shimmed_data
 

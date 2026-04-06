@@ -219,6 +219,267 @@ def rescale_and_crop(
     else:
         return center_crop(images, masks, lbs_weights, intrinsics, shape)
 
+
+def _fg_bbox(mask: torch.Tensor) -> tuple[int, int, int, int]:
+    """Return (y0, x0, y1, x1) tight bounding box of the foreground mask (H, W)."""
+    rows = mask.any(dim=1)
+    cols = mask.any(dim=0)
+    if not rows.any():
+        # No foreground — fall back to full image
+        h, w = mask.shape
+        return 0, 0, h, w
+    y0 = int(rows.nonzero(as_tuple=False)[0])
+    y1 = int(rows.nonzero(as_tuple=False)[-1]) + 1
+    x0 = int(cols.nonzero(as_tuple=False)[0])
+    x1 = int(cols.nonzero(as_tuple=False)[-1]) + 1
+    return y0, x0, y1, x1
+
+
+def sample_random_square_crop(
+    mask: torch.Tensor,
+    min_crop_ratio: float = 0.3,
+    max_crop_ratio: float = 1.0,
+    fg_padding_ratio: float = 0.05,
+) -> tuple[int, int, int]:
+    """
+    Sample a random square crop (top, left, size) from a foreground mask (H, W).
+
+    - Crop size is sampled independently and uniformly in
+      [min_crop_ratio, max_crop_ratio] x min(H, W), then clamped to
+      [1, min(H, W)] so the square always fits inside the image.
+    - Anchor — pick a random foreground pixel (cy, cx) (mask > 0.5)
+      via ``torch.nonzero`` and one random index. If there is no foreground,
+      use the image center ``(H // 2, W // 2)``.
+    - Placement — top = cy - size // 2, left = cx - size // 2, then
+      clamp top to [0, H - size] and left to [0, W - size].
+      The crop never extends outside the image; partial out-of-bounds windows
+      are not used.
+
+    After clamping near borders, the final crop center may no longer lie on a
+    foreground pixel (only the sampled anchor did).
+
+    Args:
+        mask: Binary mask tensor (H, W), foreground = 1.
+        min_crop_ratio: Minimum crop side as a fraction of min(H, W) (default 0.3).
+        max_crop_ratio: Maximum crop side fraction (≤ 1.0).
+        fg_padding_ratio: Unused; kept for API compatibility with older call sites.
+    """
+    del fg_padding_ratio  # API compatibility only
+    H, W = mask.shape
+    short_side = min(H, W)
+    m = mask > 0.5
+
+    min_size = max(1, int(short_side * min_crop_ratio))
+    max_size = min(H, W, max(1, int(short_side * max_crop_ratio)))
+    if min_size > max_size:
+        min_size = max_size
+
+    size = random.randint(min_size, max_size)
+
+    ys, xs = torch.where(m)
+    if ys.numel() > 0:
+        k = random.randrange(ys.numel())
+        cy = int(ys[k].item())
+        cx = int(xs[k].item())
+    else:
+        cy, cx = H // 2, W // 2
+
+    top = cy - size // 2
+    left = cx - size // 2
+    top = max(0, min(H - size, top))
+    left = max(0, min(W - size, left))
+    return top, left, size
+
+
+def apply_random_square_crop_to_views(
+    views: AnyViews,
+    target_shape: tuple[int, int],
+    min_crop_ratio: float = 0.3,
+    max_crop_ratio: float = 1.0,
+    fg_padding_ratio: float = 0.05,
+) -> AnyViews:
+    """
+    Apply an independent random square crop to each view, then resize to
+    ``target_shape``. See ``sample_random_square_crop`` for sampling (size +
+    random fg anchor + clamp so the window stays in-bounds).
+
+    All spatial tensors (image, mask, image_gt, mask_gt, lbs_weights,
+    uv_map, uv_valid) are cropped consistently. Intrinsics and face_bbox are updated
+    analytically.
+
+    Args:
+        views:            View dict; images expected as (V, C, H, W).
+        target_shape:     (h_out, w_out) to resize every crop to.
+        min_crop_ratio:   Minimum crop side as fraction of min(H, W) (default 0.3).
+        max_crop_ratio:   Maximum crop side fraction (≤ 1.0).
+        fg_padding_ratio: Unused; kept for API compatibility.
+    """
+    h_out, w_out = target_shape
+    images = views["image"]   # (V, C, H, W)
+    masks  = views["mask"]    # (V, H, W)
+    V, C, H, W = images.shape
+
+    # ── per-view crop params ──────────────────────────────────────────────────
+    crop_params: list[tuple[int, int, int]] = []   # (top, left, size) per view
+    for i in range(V):
+        top, left, size = sample_random_square_crop(
+            masks[i],
+            min_crop_ratio=min_crop_ratio,
+            max_crop_ratio=max_crop_ratio,
+            fg_padding_ratio=fg_padding_ratio,
+        )
+        crop_params.append((top, left, size))
+
+    # ── helper: crop-then-resize a (C, H, W) tensor ──────────────────────────
+    def _cr_chw(t: torch.Tensor, top: int, left: int, size: int) -> torch.Tensor:
+        t = t[:, top:top + size, left:left + size].unsqueeze(0).float()
+        return F.interpolate(t, (h_out, w_out), mode="bilinear", align_corners=False).squeeze(0)
+
+    def _cr_hw(t: torch.Tensor, top: int, left: int, size: int) -> torch.Tensor:
+        t = t[top:top + size, left:left + size].unsqueeze(0).unsqueeze(0).float()
+        return F.interpolate(t, (h_out, w_out), mode="nearest").squeeze(0).squeeze(0)
+
+    # ── image & mask ─────────────────────────────────────────────────────────
+    imgs_out, masks_out = [], []
+    for i, (top, left, size) in enumerate(crop_params):
+        imgs_out.append(_cr_chw(images[i], top, left, size))
+        masks_out.append(_cr_hw(masks[i], top, left, size))
+
+    new_views: AnyViews = {
+        **views,
+        "image": torch.stack(imgs_out),
+        "mask":  torch.stack(masks_out),
+    }
+
+    # ── image_gt ─────────────────────────────────────────────────────────────
+    if "image_gt" in views:
+        imgs_gt_out = [
+            _cr_chw(views["image_gt"][i], top, left, size)
+            for i, (top, left, size) in enumerate(crop_params)
+        ]
+        new_views["image_gt"] = torch.stack(imgs_gt_out)
+
+    # ── mask_gt ───────────────────────────────────────────────────────────────
+    if "mask_gt" in views:
+        masks_gt_out = [
+            _cr_hw(views["mask_gt"][i], top, left, size)
+            for i, (top, left, size) in enumerate(crop_params)
+        ]
+        new_views["mask_gt"] = torch.stack(masks_gt_out)
+
+    # ── lbs_weights (V, H, W, D) ─────────────────────────────────────────────
+    if "lbs_weights" in views and views["lbs_weights"] is not None:
+        lbs = views["lbs_weights"]
+        D = lbs.shape[-1]
+        lbs_out = []
+        for i, (top, left, size) in enumerate(crop_params):
+            t = lbs[i, top:top + size, left:left + size, :].permute(2, 0, 1).unsqueeze(0).float()
+            t = F.interpolate(t, (h_out, w_out), mode="bilinear", align_corners=False)
+            lbs_out.append(t.squeeze(0).permute(1, 2, 0))
+        new_views["lbs_weights"] = torch.stack(lbs_out)
+
+    # ── uv_map (V, H, W, 2) & uv_valid (V, H, W) ────────────────────────────
+    if "uv_map" in views and "uv_valid" in views:
+        uv_map   = views["uv_map"]
+        uv_valid = views["uv_valid"]
+        uv_map_out, uv_valid_out = [], []
+        for i, (top, left, size) in enumerate(crop_params):
+            um = uv_map[i, top:top + size, left:left + size, :].permute(2, 0, 1).unsqueeze(0).float()
+            um = F.interpolate(um, (h_out, w_out), mode="bilinear", align_corners=False)
+            uv_map_out.append(um.squeeze(0).permute(1, 2, 0))
+
+            uv_v = uv_valid[i, top:top + size, left:left + size].unsqueeze(0).unsqueeze(0).float()
+            uv_v = F.interpolate(uv_v, (h_out, w_out), mode="nearest").squeeze(0).squeeze(0).bool()
+            uv_valid_out.append(uv_v)
+        new_views["uv_map"]   = torch.stack(uv_map_out)
+        new_views["uv_valid"] = torch.stack(uv_valid_out)
+
+    # ── intrinsics ────────────────────────────────────────────────────────────
+    # Normalized K: fx_new = fx * W / size,  cx_new = (cx*W - left) / size
+    # Then rescaled to output resolution (square → uniform scale, so only size matters)
+    intrinsics = views["intrinsics"].clone()
+    orig_K = views["intrinsics"]
+    for i, (top, left, size) in enumerate(crop_params):
+        size = max(size, 1)
+        intrinsics[i, 0, 0] = orig_K[i, 0, 0] * W / size
+        intrinsics[i, 1, 1] = orig_K[i, 1, 1] * H / size
+        intrinsics[i, 0, 2] = (orig_K[i, 0, 2] * W - left) / size
+        intrinsics[i, 1, 2] = (orig_K[i, 1, 2] * H - top)  / size
+    new_views["intrinsics"] = intrinsics
+
+    # ── face_bbox: x1,y1,x2,y2 in original px → output px ───────────────────
+    if "face_bbox" in views and views["face_bbox"] is not None and len(views["face_bbox"]) > 0:
+        bboxes = views["face_bbox"].float()
+        new_bboxes = []
+        for i, (top, left, size) in enumerate(crop_params):
+            size = max(size, 1)
+            sx = w_out / size
+            sy = h_out / size
+            b = bboxes[i]
+            new_bboxes.append(torch.stack([
+                (b[0] - left) * sx,
+                (b[1] - top)  * sy,
+                (b[2] - left) * sx,
+                (b[3] - top)  * sy,
+            ]))
+        new_views["face_bbox"] = torch.stack(new_bboxes)
+
+    return new_views
+
+
+def _slice_context_view(views: AnyViews, i: int, V: int) -> AnyViews:
+    """Take view index ``i`` from a batch of ``V`` context views (leading dim ``V``)."""
+    out: dict = {}
+    for k, v in views.items():
+        if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.shape[0] == V:
+            out[k] = v[i : i + 1]
+        else:
+            out[k] = v
+    return out  # type: ignore[return-value]
+
+
+def _merge_context_views(parts: list[AnyViews]) -> AnyViews:
+    """Concatenate single-view context dicts (each leading batch dim 1) along dim 0."""
+    if not parts:
+        return {}
+    _take_first = {"overlap"}
+    out: dict = {}
+    for k in parts[0].keys():
+        vals = [p[k] for p in parts]
+        v0 = vals[0]
+        if k in _take_first:
+            out[k] = v0
+        elif isinstance(v0, torch.Tensor) and v0.shape[0] == 1:
+            out[k] = torch.cat(vals, dim=0)
+        else:
+            out[k] = v0
+    return out  # type: ignore[return-value]
+
+
+def apply_mixed_random_square_crop_to_views(
+    views: AnyViews,
+    target_shape: tuple[int, int],
+    per_view_random_prob: float,
+    pad: bool,
+    bgcolor: torch.Tensor | None,
+    **kwargs: object,
+) -> AnyViews:
+    """
+    For each context view independently: with probability ``per_view_random_prob`` apply
+    mask-aware random square crop; otherwise standard center-rescale crop (same as
+    ``apply_crop_shim_to_views``).
+    """
+    V = views["image"].shape[0]
+    parts: list[AnyViews] = []
+    for i in range(V):
+        one = _slice_context_view(views, i, V)
+        if random.random() < per_view_random_prob:
+            parts.append(apply_random_square_crop_to_views(one, target_shape, **kwargs))  # type: ignore[arg-type]
+        else:
+            parts.append(apply_crop_shim_to_views(one, target_shape, pad, bgcolor))
+    return _merge_context_views(parts)
+
+
 def apply_bbox_crop_to_views(
     views: AnyViews,
     crop_params_list: list[tuple[int, int, int, int]],
@@ -423,18 +684,59 @@ def apply_crop_shim(
     shape: tuple[int, int],
     pad: bool = False,
     context_bbox_crops: list[tuple[int, int, int, int]] | None = None,
+    random_square_crop: bool = False,
+    random_square_crop_kwargs: dict | None = None,
+    random_square_crop_prob: float | None = None,
 ) -> AnyExample:
     """Crop images in the example.
 
-    When context_bbox_crops is provided (a list of (top, left, ch, cw) per context
-    view), context views are cropped via apply_bbox_crop_to_views and then the result
-    is returned at 'shape' resolution.  Target views always receive the standard
-    center-rescale crop so their camera geometry is undisturbed.
+    Priority order for context views:
+      1. context_bbox_crops  — pre-computed (top, left, h, w) per view (for eval mainly).
+      2. random_square_crop  — mask-aware random square crop (optionally per-view random, see below).
+      3. Fallback            — standard center-rescale crop.
+
+    Target views always receive the standard center-rescale crop so their camera
+    geometry remains undisturbed.
+
+    Args:
+        example:                  Batch dict with "context" and "target" view dicts.
+        shape:                    Output (h, w) for all views.
+        pad:                      Use padding instead of cropping (passed to fallback).
+        context_bbox_crops:       Pre-computed crop params for context (existing).
+        random_square_crop:       If True and context_bbox_crops is None, apply random/center
+                                  logic for context views.
+        random_square_crop_kwargs: Optional kwargs forwarded to
+                                  apply_random_square_crop_to_views (e.g.
+                                  min_crop_ratio, max_crop_ratio).
+        random_square_crop_prob: When ``random_square_crop`` is True, probability **per context
+                                 view** of using random square crop vs center crop.
+                                 ``None`` or ``>= 1`` means every view uses random square crop;
+                                 ``<= 0`` means every view uses center crop; in ``(0, 1)`` each
+                                 view is decided independently.
     """
     if context_bbox_crops is not None:
+        # Existing path: pre-specified rectangular crops
         context_views = apply_bbox_crop_to_views(example["context"], context_bbox_crops, shape)
+    elif random_square_crop:
+        kwargs = random_square_crop_kwargs or {}
+        prob = random_square_crop_prob if random_square_crop_prob is not None else 1.0
+        if prob <= 0.0:
+            context_views = apply_crop_shim_to_views(example["context"], shape, pad, example["bgcolor"])
+        elif prob >= 1.0:
+            context_views = apply_random_square_crop_to_views(example["context"], shape, **kwargs)
+        else:
+            context_views = apply_mixed_random_square_crop_to_views(
+                example["context"],
+                shape,
+                prob,
+                pad,
+                example["bgcolor"],
+                **kwargs,
+            )
     else:
+        # Original fallback: centre-rescale crop
         context_views = apply_crop_shim_to_views(example["context"], shape, pad, example["bgcolor"])
+
     return {
         **example,
         "context": context_views,

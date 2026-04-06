@@ -28,3 +28,6 @@ background_color: [0, 0, 0]
 view_sampler:
   index_path: "assets/evaluation_xhuman.json"
 consistent_set_prob: 0.0 
+random_crop: false
+random_crop_prob: 0.5
+min_crop_ratio: 0.3
