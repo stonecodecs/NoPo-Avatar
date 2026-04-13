@@ -198,7 +198,7 @@ class UVPatchPositionalEncoder(torch.nn.Module):
 
         return patch_emb  # (B, N, enc_embed_dim)
 
-    def from_uv_grid(self, n_h: int, n_w: int, device: torch.device) -> torch.Tensor:
+    def from_uv_grid(self, n_h: int, n_w: int, device: torch.device, template_mask: torch.Tensor=None) -> torch.Tensor:
         """
         UV PE for a template that is already defined in UV space.
         
@@ -218,7 +218,10 @@ class UVPatchPositionalEncoder(torch.nn.Module):
             uv_grid = torch.stack([u, v], dim=-1).unsqueeze(0)  # (1, H, W, 2)
             
             # 2. Use the same logic as forward() but with all pixels valid
-            uv_valid = torch.ones((1, H, W), device=device, dtype=torch.float32)
+            if template_mask is not None: # use UV template mask (0=empty space, 1=body part regions)
+                uv_valid = template_mask.float().reshape(1, H, W)
+            else: # default all 1s
+                uv_valid = torch.ones((1, H, W), device=device, dtype=torch.float32)
             
             # We call the internal logic of forward
             # (Alternatively, we can just call self.forward(uv_grid, uv_valid))

@@ -189,7 +189,7 @@ class AsymmetricCroCoMultiUV(CroCoNet):
 
     def _encode_image(self, template, template_shape, image, true_shape,
                       intrinsics_embed=None, foreground_mask=None,
-                      uv_map=None, uv_valid=None):
+                      uv_map=None, uv_valid=None, template_mask=None):
         # embed the image into patches  (x has size B x Npatches x C)
         x, pos, attn_mask = self.patch_embed(image, true_shape=true_shape, foreground_mask=foreground_mask)
         if template.shape[1] == 24 + 3:
@@ -229,8 +229,10 @@ class AsymmetricCroCoMultiUV(CroCoNet):
             B_t = template.shape[0]
             H_t = int(template_shape[0, 0].item())
             W_t = int(template_shape[0, 1].item())
+            # ! if template_encoder_free=True, these are actually OVERWRITTEN
+            # later will apply 'again'
             tmpl_uv_pe = self.uv_patch_pe.from_uv_grid(
-                H_t // 16, W_t // 16, template.device
+                H_t // 16, W_t // 16, template.device, template_mask
             )  # (1, N_t, enc_dim)
             template = template + tmpl_uv_pe.expand(B_t, -1, -1)
 
@@ -286,6 +288,11 @@ class AsymmetricCroCoMultiUV(CroCoNet):
         else:
             template = repeat(self.template_embed, "l c -> b l c", b=template.shape[0])
             template = self.template_embedder(template)
+            if self.use_uv_pe:
+                H_t = int(template_shape[0, 0].item())
+                W_t = int(template_shape[0, 1].item())
+                tmpl_uv_pe = self.uv_patch_pe.from_uv_grid(H_t // 16, W_t // 16, template.device, template_mask)
+                template = template + tmpl_uv_pe.expand(template.shape[0], -1, -1)
         return template, pos_template, x, pos, attn_mask
 
     def _decoder(self, feat_template, pose_template, feat, pose, extra_embed=None, feat_mask=None):
@@ -423,10 +430,13 @@ class AsymmetricCroCoMultiUV(CroCoNet):
             uv_map_bv = rearrange(context["uv_map"], "b v h w c -> (b v) h w c").contiguous()
             uv_valid_bv = rearrange(context["uv_valid"].float(), "b v h w -> (b v) h w").contiguous()
 
+        template_mask = context.get("template_mask", None)  # 2D UV map denoting empty regions (0) and body part regions
+
         if self.disable_checkpointing:
             feat_template, pose_template, feat, pose, enc_attn_mask = self._encode_image(
                 template, shape_template, images_all, shape_all, intrinsic_embedding_all,
                 foreground_mask=foreground_masks, uv_map=uv_map_bv, uv_valid=uv_valid_bv,
+                template_mask=template_mask,
             )
             # feat_template: [1, N_temp, embed_dim]
             # pose_template: [1, N_temp, 2]
@@ -437,7 +447,7 @@ class AsymmetricCroCoMultiUV(CroCoNet):
                 self._encode_image,
                 template, shape_template, images_all, shape_all, intrinsic_embedding_all,
                 foreground_mask=foreground_masks, uv_map=uv_map_bv, uv_valid=uv_valid_bv,
-                use_reentrant=False,
+                template_mask=template_mask, use_reentrant=False,
             )
 
         feat = rearrange(feat, "(b v) l c -> b v l c", b=b, v=v).contiguous()
