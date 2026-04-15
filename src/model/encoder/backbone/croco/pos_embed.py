@@ -219,7 +219,7 @@ class UVPatchPositionalEncoder(torch.nn.Module):
             
             # 2. Use the same logic as forward() but with all pixels valid
             if template_mask is not None: # use UV template mask (0=empty space, 1=body part regions)
-                uv_valid = template_mask.float().reshape(1, H, W)
+                uv_valid = template_mask.float().reshape(-1, H, W)[0]  # template_masks should be all the same throughout batches
             else: # default all 1s
                 uv_valid = torch.ones((1, H, W), device=device, dtype=torch.float32)
             
